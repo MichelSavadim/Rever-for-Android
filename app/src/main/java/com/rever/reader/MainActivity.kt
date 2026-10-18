@@ -24,6 +24,11 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.Environment
+import android.os.StatFs
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
@@ -86,7 +91,49 @@ class MainActivity : Activity() {
 
     private val importRequest = 1001
     private val saveExportRequest = 1002
+    private val chooseStorageRequest = 1103
+    private val createBackupRequest = 1104
+    private val restoreBackupRequest = 1105
     private val io = Executors.newSingleThreadExecutor()
+    private val backup by lazy { ReverBackup(this) }
+    private val location by lazy { LibraryLocation(this) }
+    private val storageHandler = Handler(Looper.getMainLooper())
+    private val syncStorage = Runnable {
+        if (!io.isShutdown) io.execute {
+            try { location.sync() }
+            catch (error: Exception) { android.util.Log.e("ReverStorage", "Falha ao sincronizar a pasta", error) }
+        }
+    }
+    private fun queueStorageSync() {
+        if (location.selectedUri() == null) return
+        storageHandler.removeCallbacks(syncStorage)
+        storageHandler.postDelayed(syncStorage, 3_000)
+    }
+    private val readingStats by lazy { ReadingStats(this) }
+    private val statsHandler = Handler(Looper.getMainLooper())
+    private var readingTickAt = 0L
+    private var pendingReadingMs = 0L
+    private var inForeground = false
+    private fun flushReadingTime() {
+        if (pendingReadingMs > 0) activeBook?.let {
+            readingStats.addDuration(it.id, "reading_ms", pendingReadingMs)
+        }
+        pendingReadingMs = 0L
+    }
+    private val readingTick = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            val reading = inForeground && hasWindowFocus() && screenMode == "reader" &&
+                activeBook != null && mediaController?.isPlaying != true &&
+                (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
+            if (reading && readingTickAt > 0L) {
+                pendingReadingMs += (now - readingTickAt).coerceAtMost(2_000)
+                if (pendingReadingMs >= 15_000) flushReadingTime()
+            } else flushReadingTime()
+            readingTickAt = if (reading) now else 0L
+            statsHandler.postDelayed(this, 1_000)
+        }
+    }
     private lateinit var root: FrameLayout
     private lateinit var viewer: PdfCanvasView
     private lateinit var title: TextView
@@ -146,6 +193,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        backup.recoverIfNeeded()
         root = FrameLayout(this)
         root.setBackgroundColor(backgroundColor())
         viewer = PdfCanvasView(this).apply {
@@ -153,7 +201,10 @@ class MainActivity : Activity() {
             onVisiblePageChanged = { number ->
                 currentPage = number
                 updatePageLabel()
-                if (!restoringReaderPage) saveReaderState()
+                if (!restoringReaderPage) {
+                    activeBook?.let { readingStats.markPage(it.id, number, it.pageCount) }
+                    saveReaderState()
+                }
             }
             onViewportMoved = { showPageControls() }
             onPageTap = { number, x, y ->
@@ -327,6 +378,7 @@ class MainActivity : Activity() {
         })
         setContentView(root)
         connectPlayer()
+        backup.schedule()
         val books = loadBooks()
         val last = getPreferences(MODE_PRIVATE).getString("last_book_id", null)
         val startup = getPreferences(MODE_PRIVATE).getString("startup_screen", "library")
@@ -342,6 +394,15 @@ class MainActivity : Activity() {
             else -> showLibrary()
         }
         updatePageLabel()
+        if (location.selectedUri() != null) io.execute {
+            try {
+                location.sync()
+                runOnUiThread { if (screenMode == "library") showLibrary() }
+            } catch (error: Exception) {
+                runOnUiThread { Toast.makeText(this,
+                    "Pasta de armazenamento indisponível: ${error.message}", Toast.LENGTH_LONG).show() }
+            }
+        }
         latestRelease = getPreferences(MODE_PRIVATE).getString("latest_release", null)?.let {
             try { ReverRelease.fromJson(JSONObject(it)) } catch (_: Exception) { null }
         }
@@ -703,6 +764,8 @@ class MainActivity : Activity() {
     }
 
     private fun showLibrary() {
+        flushReadingTime()
+        readingTickAt = 0L
         bookLoadToken++
         restoringReaderPage = false
         closePanel()
@@ -731,6 +794,7 @@ class MainActivity : Activity() {
         }
         renderAudioTime()
         screenMode = "library"
+        queueStorageSync()
         val screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(8))
@@ -907,7 +971,7 @@ class MainActivity : Activity() {
 
     private fun showSettings() {
         closePanel()
-        if (screenMode != "settings") settingsReturn = screenMode
+        if (screenMode == "reader" || screenMode == "library") settingsReturn = screenMode
         screenMode = "settings"
         val screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -933,17 +997,9 @@ class MainActivity : Activity() {
             setTextColor(textColor())
         })
         screen.addView(settingsHeader, LinearLayout.LayoutParams(-1, dp(56)))
-        screen.addView(button("Idioma: ${currentLanguage()}") { chooseLanguage() })
-        screen.addView(button("Voz: ${currentVoice()}") { chooseVoice() })
-        screen.addView(button("Instalar mais vozes no Android") {
-            try {
-                startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA))
-            } catch (_: Exception) {
-                AlertDialog.Builder(this).setTitle("Instalar vozes")
-                    .setMessage("Abra as Configurações do celular, depois Acessibilidade → Conversão de texto em voz → Instalar dados de voz. Escolha português do Brasil e instale as vozes desejadas.")
-                    .setPositiveButton("Entendi", null).show()
-            }
-        })
+        screen.addView(button("Narração") { showNarrationSettings() })
+        screen.addView(button("Dados e Armazenamento") { showDataSettings() })
+        screen.addView(button("Estatísticas") { showStatistics() })
         screen.addView(button("Modo escuro: ${if (darkMode()) "ligado" else "desligado"}") {
             getPreferences(MODE_PRIVATE).edit()
                 .putBoolean("dark_mode", !darkMode()).apply()
@@ -959,6 +1015,277 @@ class MainActivity : Activity() {
         screen.addView(button("Sobre") { showAbout() })
         setContentView(screen)
     }
+
+    private fun subScreen(titleText: String, back: () -> Unit): LinearLayout {
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(14), dp(18), dp(12))
+            setBackgroundColor(backgroundColor())
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(button("←", back).apply {
+            contentDescription = "Voltar"
+            textSize = 23f
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(0, 0, 0, 0)
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(10) })
+        header.addView(TextView(this).apply {
+            text = titleText
+            textSize = 25f
+            setTextColor(textColor())
+        })
+        screen.addView(header, LinearLayout.LayoutParams(-1, dp(56)))
+        return screen
+    }
+
+    private fun showNarrationSettings() {
+        screenMode = "narration_settings"
+        val screen = subScreen("Narração") { showSettings() }
+        screen.addView(button("Idioma: ${currentLanguage()}") { chooseLanguage() })
+        screen.addView(button("Voz: ${currentVoice()}") { chooseVoice() })
+        screen.addView(button("Instalar mais vozes no Android") {
+            try {
+                startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA))
+            } catch (_: Exception) {
+                AlertDialog.Builder(this).setTitle("Instalar vozes")
+                    .setMessage("Abra as Configurações do celular, depois Acessibilidade → Conversão de texto em voz → Instalar dados de voz. Escolha português do Brasil e instale as vozes desejadas.")
+                    .setPositiveButton("Entendi", null).show()
+            }
+        })
+        setContentView(screen)
+    }
+
+    private fun showStatistics() {
+        flushReadingTime()
+        screenMode = "statistics"
+        val books = loadBooks()
+        val history = readingStats.snapshot(books.map { it.id }.toSet())
+        val screen = subScreen("Estatísticas") { showSettings() }
+        val scroll = ScrollView(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun section(label: String) {
+            content.addView(TextView(this).apply {
+                text = label
+                textSize = 20f
+                setTextColor(textColor())
+                setPadding(0, dp(20), 0, dp(12))
+            })
+        }
+        fun cells(vararg entries: Pair<String, String>) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for ((value, caption) in entries) {
+                val cell = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    setPadding(dp(3), dp(14), dp(3), dp(14))
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(10).toFloat()
+                        setColor(surfaceColor())
+                    }
+                }
+                cell.addView(TextView(this).apply {
+                    text = value
+                    textSize = 19f
+                    gravity = Gravity.CENTER
+                    setTextColor(textColor())
+                })
+                cell.addView(TextView(this).apply {
+                    text = caption
+                    textSize = 11f
+                    gravity = Gravity.CENTER
+                    setTextColor(textColor())
+                })
+                row.addView(cell, LinearLayout.LayoutParams(0, dp(112), 1f).apply {
+                    rightMargin = dp(4)
+                })
+            }
+            content.addView(row)
+        }
+        fun duration(millis: Long): String {
+            val minutes = millis / 60_000
+            return when {
+                minutes >= 60 -> "${minutes / 60}h ${minutes % 60}min"
+                minutes > 0 -> "${minutes}min"
+                else -> "${millis / 1000}s"
+            }
+        }
+        section("Visão geral")
+        cells(books.size.toString() to "Na biblioteca",
+            duration(history.readingMs) to "Duração total de leitura",
+            duration(history.narrationMs) to "Duração de narração",
+            history.completed.toString() to "Itens completos")
+        section("Itens")
+        cells(history.started.toString() to "Iniciados",
+            books.count { book -> File(book.folder, "exports").listFiles()?.any { it.extension.equals("mp3", true) } == true }
+                .toString() to "Narração local",
+            books.sumOf { it.pageCount }.toString() to "Páginas",
+            history.pagesRead.toString() to "Páginas lidas")
+        scroll.addView(content)
+        screen.addView(scroll)
+        setContentView(screen)
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        var amount = bytes.coerceAtLeast(0).toDouble()
+        var unit = 0
+        while (amount >= 1024 && unit < units.lastIndex) { amount /= 1024; unit++ }
+        return if (unit == 0) "${amount.toLong()} B" else String.format(Locale.getDefault(), "%.1f %s", amount, units[unit])
+    }
+
+    private fun lastBackupDescription(): String {
+        val at = backup.lastBackupAt()
+        if (at == 0L) return "Nenhum backup criado ainda"
+        val elapsed = (System.currentTimeMillis() - at).coerceAtLeast(0L)
+        if (elapsed >= 24 * 60 * 60 * 1000L) return "Último backup: " +
+            DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm", Locale.getDefault())
+                .format(Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()))
+        val seconds = elapsed / 1000
+        return "Último backup há " + when {
+            seconds < 60 -> "$seconds segundos"
+            seconds < 3600 -> "${seconds / 60} minutos"
+            else -> "${seconds / 3600} horas e ${(seconds % 3600) / 60} minutos"
+        }
+    }
+
+    private fun showDataSettings() {
+        screenMode = "data_settings"
+        val screen = subScreen("Dados e Armazenamento") { showSettings() }
+        val scroll = ScrollView(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun description(text: String): TextView = TextView(this).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(textColor())
+            setPadding(dp(8), dp(2), dp(8), dp(12))
+        }
+        val chooseStorage = {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }, chooseStorageRequest)
+        }
+        content.addView(button("Local de Armazenamento") { chooseStorage() })
+        content.addView(description(location.label()).apply { setOnClickListener { chooseStorage() } })
+        val backupActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        backupActions.addView(button("Criar backup") {
+            startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+                putExtra(Intent.EXTRA_TITLE, "Rever-backup-${System.currentTimeMillis()}.zip")
+            }, createBackupRequest)
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { rightMargin = dp(4) })
+        backupActions.addView(button("Restaurar backup") {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+            }, restoreBackupRequest)
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        content.addView(backupActions)
+        val frequencies = listOf(0L to "Desligado", 6L to "A cada 6h", 12L to "A cada 12h",
+            24L to "Diariamente", 48L to "A cada 2 dias", 168L to "Semanalmente")
+        val current = frequencies.firstOrNull { it.first == backup.frequencyHours() }?.second ?: "A cada 12h"
+        content.addView(button("Frequência de backup automático: $current") {
+            AlertDialog.Builder(this).setTitle("Frequência de backup automático")
+                .setSingleChoiceItems(frequencies.map { it.second }.toTypedArray(),
+                    frequencies.indexOfFirst { it.first == backup.frequencyHours() }) { dialog, which ->
+                    backup.setFrequency(frequencies[which].first)
+                    dialog.dismiss()
+                    showDataSettings()
+                }.setNegativeButton("Cancelar", null).show()
+        })
+        content.addView(description(lastBackupDescription() + " • Downloads/Rever/Backups"))
+        content.addView(TextView(this).apply {
+            text = "Uso de armazenamento"
+            textSize = 19f
+            setTextColor(textColor())
+            setPadding(dp(6), dp(18), 0, dp(8))
+        })
+        val usageBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply { cornerRadius = dp(9).toFloat(); setColor(0xFFD9E2E9.toInt()) }
+            clipToOutline = true
+        }
+        content.addView(usageBar, LinearLayout.LayoutParams(-1, dp(18)))
+        val legend = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(12))
+        }
+        content.addView(legend)
+        content.addView(button("Limpar o cachê dos PDFs") {
+            AlertDialog.Builder(this).setTitle("Limpar o cachê dos PDFs?")
+                .setMessage("Os arquivos temporários dos PDFs serão removidos. Eles poderão ser criados novamente quando necessários.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Limpar") { _, _ ->
+                    io.execute {
+                        val removed = pdfCacheFiles().map { it.deleteRecursively() }.all { it }
+                        runOnUiThread {
+                            viewer.clearRenderCache()
+                            Toast.makeText(this, if (removed) "Cache limpo." else "Parte do cache não pôde ser limpa.",
+                                Toast.LENGTH_LONG).show()
+                            showDataSettings()
+                        }
+                    }
+                }.show()
+        })
+        val cacheSize = description("Calculando cache…")
+        content.addView(cacheSize)
+        scroll.addView(content)
+        screen.addView(scroll)
+        setContentView(screen)
+        io.execute {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val total = stat.totalBytes.coerceAtLeast(1L)
+            val available = stat.availableBytes.coerceIn(0L, total)
+            val external = try { location.primaryDeviceBytes() } catch (_: Exception) { 0L }
+            val own = (directorySize(filesDir) + directorySize(cacheDir) + external)
+                .coerceIn(0L, total - available)
+            val other = (total - available - own).coerceAtLeast(0L)
+            val cacheBytes = pdfCacheFiles().sumOf(::directorySize)
+            runOnUiThread {
+                if (screenMode != "data_settings") return@runOnUiThread
+                cacheSize.text = "Em cache: ${formatBytes(cacheBytes)}"
+                usageBar.removeAllViews()
+                legend.removeAllViews()
+                val parts = listOf(Triple(own, "Rever", 0xFF438CE8.toInt()),
+                    Triple(other, "Outros dados", 0xFF8793A1.toInt()),
+                    Triple(available, "Disponível", 0xFFB6D5BA.toInt()))
+                for ((bytes, label, color) in parts) {
+                    usageBar.addView(View(this).apply { setBackgroundColor(color) },
+                        LinearLayout.LayoutParams(0, -1, bytes.toFloat().coerceAtLeast(0.01f)))
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    row.addView(View(this).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(color)
+                        }
+                    }, LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(8) })
+                    row.addView(TextView(this).apply {
+                        text = "$label  ${formatBytes(bytes)}"
+                        textSize = 14f
+                        setTextColor(textColor())
+                    })
+                    legend.addView(row, LinearLayout.LayoutParams(-1, dp(25)))
+                }
+            }
+        }
+    }
+
+    private fun directorySize(file: File): Long = if (file.isFile) file.length()
+        else file.listFiles()?.sumOf(::directorySize) ?: 0L
+
+    private fun pdfCacheFiles(): List<File> = cacheDir.listFiles()?.filter {
+        it.name != "updates" && !it.name.startsWith("restore-")
+    } ?: emptyList()
 
     private fun showCategoryPicker(books: List<Book>) {
         val categories = categoryStore.all()
@@ -1005,6 +1332,7 @@ class MainActivity : Activity() {
     }
 
     private fun showCategories() {
+        queueStorageSync()
         screenMode = "categories"
         val screen = FrameLayout(this).apply { setBackgroundColor(backgroundColor()) }
         val content = LinearLayout(this).apply {
@@ -1234,7 +1562,7 @@ class MainActivity : Activity() {
     }
 
     private fun installedVersion(): String =
-        packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0"
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "1.1.0"
 
     private fun releaseDate(value: String): String = try {
         Instant.parse(value).atZone(ZoneId.systemDefault())
@@ -1513,7 +1841,7 @@ class MainActivity : Activity() {
                             mediaController?.pause()
                             mediaController?.clearMediaItems()
                             reloadTimelineForVoice()
-                            showSettings()
+                            showNarrationSettings()
                         }.show()
                 }
             } catch (error: Exception) { runOnUiThread { reportNarrationError(error) } }
@@ -1552,7 +1880,7 @@ class MainActivity : Activity() {
                                 mediaController?.clearMediaItems()
                                 reloadTimelineForVoice()
                                 dialog.dismiss()
-                                if (screenMode == "settings") showSettings()
+                                if (screenMode == "narration_settings") showNarrationSettings()
                             }
                         }
                         dialog.show()
@@ -1742,6 +2070,68 @@ class MainActivity : Activity() {
     @Deprecated("Framework file picker callback")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode == RESULT_OK && requestCode == chooseStorageRequest) {
+            val uri = data?.data ?: return
+            mediaController?.pause()
+            saveReaderState()
+            Toast.makeText(this, "Transferindo dados para a pasta selecionada…", Toast.LENGTH_LONG).show()
+            io.execute {
+                try {
+                    location.select(uri)
+                    runOnUiThread { showDataSettings(); Toast.makeText(this,
+                        "Local de armazenamento atualizado.", Toast.LENGTH_LONG).show() }
+                } catch (error: Exception) {
+                    runOnUiThread { Toast.makeText(this,
+                        "Falha ao mudar o local: ${error.message}", Toast.LENGTH_LONG).show() }
+                }
+            }
+            return
+        }
+        if (resultCode == RESULT_OK && requestCode == createBackupRequest) {
+            val uri = data?.data ?: return
+            saveReaderState()
+            Toast.makeText(this, "Criando backup…", Toast.LENGTH_SHORT).show()
+            io.execute {
+                try {
+                    location.sync()
+                    contentResolver.openOutputStream(uri, "w")!!.use(backup::writeTo)
+                    runOnUiThread { showDataSettings(); Toast.makeText(this,
+                        "Backup criado.", Toast.LENGTH_LONG).show() }
+                } catch (error: Exception) {
+                    runOnUiThread { Toast.makeText(this,
+                        "Falha no backup: ${error.message}", Toast.LENGTH_LONG).show() }
+                }
+            }
+            return
+        }
+        if (resultCode == RESULT_OK && requestCode == restoreBackupRequest) {
+            val uri = data?.data ?: return
+            AlertDialog.Builder(this).setTitle("Restaurar backup?")
+                .setMessage("Os dados atuais da biblioteca serão substituídos pelos dados do backup selecionado.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Restaurar") { _, _ ->
+                    showLibrary()
+                    Toast.makeText(this, "Restaurando backup…", Toast.LENGTH_SHORT).show()
+                    io.execute {
+                        try {
+                            contentResolver.openInputStream(uri)!!.use(backup::restoreFrom)
+                            val syncError = try { location.replaceRemote(); null }
+                                catch (error: Exception) { error }
+                            runOnUiThread {
+                                showDataSettings()
+                                Toast.makeText(this,
+                                    if (syncError == null) "Backup restaurado."
+                                    else "Backup restaurado, mas não foi possível sincronizar a pasta: ${syncError.message}",
+                                    Toast.LENGTH_LONG).show()
+                            }
+                        } catch (error: Exception) {
+                            runOnUiThread { Toast.makeText(this,
+                                "Falha na restauração: ${error.message}", Toast.LENGTH_LONG).show() }
+                        }
+                    }
+                }.show()
+            return
+        }
         if (requestCode == saveExportRequest && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             val source = pendingExportSave ?: return
@@ -1838,6 +2228,7 @@ class MainActivity : Activity() {
             if (categoryId != null) categoryStore.assign(folder, setOf(categoryId))
             val initialTiming = DurationTimeline.load(folder, extracted, currentVoice())
             writeTextAtomic(initialTiming.file, initialTiming.snapshot())
+            queueStorageSync()
             return Book(id, title, count, folder, addedAt, 0L)
         } finally {
             temp.delete()
@@ -1900,6 +2291,7 @@ class MainActivity : Activity() {
     }
 
     private fun showBook(book: Book) {
+        flushReadingTime()
         try {
             val metadata = JSONObject(File(book.folder, "book.json").readText(Charsets.UTF_8))
             metadata.put("last_read_at", System.currentTimeMillis())
@@ -1921,6 +2313,7 @@ class MainActivity : Activity() {
             restoringReaderPage = true
             viewer.open(book.pdf)
             activeBook = book
+            readingStats.markOpened(book.id)
             paragraphs = emptyList()
             searchParagraphs = null
             searchLoading = false
@@ -1960,6 +2353,7 @@ class MainActivity : Activity() {
                     viewer.showPage(savedPage)
                     currentPage = savedPage
                     restoringReaderPage = false
+                    readingStats.markPage(book.id, savedPage, book.pageCount)
                     updatePageLabel()
                     if (rebuildParagraphs || paragraphs.isNotEmpty()) saveReaderState()
                 }
@@ -2035,6 +2429,7 @@ class MainActivity : Activity() {
         try {
             partial.writeText(text, Charsets.UTF_8)
             check(partial.renameTo(file)) { "Não foi possível salvar ${file.name}." }
+            queueStorageSync()
         } finally {
             partial.delete()
         }
@@ -2296,6 +2691,7 @@ class MainActivity : Activity() {
             } catch (error: Exception) {
                 runOnUiThread { reportNarrationError(error) }
             } finally {
+                queueStorageSync()
                 runOnUiThread { exporting = false; progressDialog.dismiss() }
             }
         }
@@ -2377,6 +2773,10 @@ class MainActivity : Activity() {
                 if (book.folder.canonicalFile.parentFile == library.canonicalFile && !io.isShutdown) {
                     io.execute {
                         val deleted = book.folder.deleteRecursively()
+                        if (deleted) {
+                            readingStats.removeBook(book.id)
+                            queueStorageSync()
+                        }
                         runOnUiThread {
                             if (deleted) {
                                 if (getPreferences(MODE_PRIVATE).getString("last_book_id", null) == book.id) {
@@ -2438,6 +2838,8 @@ class MainActivity : Activity() {
                 showSettings()
             }
             screenMode == "categories" -> leaveCategories()
+            screenMode == "narration_settings" || screenMode == "data_settings" ||
+                screenMode == "statistics" -> showSettings()
             screenMode == "settings" -> leaveSettings()
             screenMode == "reader" -> showLibrary()
             screenMode == "library" && librarySelections.isNotEmpty() -> {
@@ -2459,11 +2861,23 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         wasStopped = true
+        queueStorageSync()
         super.onStop()
+    }
+
+    override fun onPause() {
+        inForeground = false
+        readingTickAt = 0L
+        flushReadingTime()
+        statsHandler.removeCallbacks(readingTick)
+        super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
+        inForeground = true
+        statsHandler.removeCallbacks(readingTick)
+        statsHandler.post(readingTick)
         if (wasStopped) {
             wasStopped = false
             val apk = pendingInstallApk
@@ -2502,6 +2916,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        inForeground = false
+        statsHandler.removeCallbacks(readingTick)
         bookLoadToken++
         viewer.closeDocument()
         io.shutdown()

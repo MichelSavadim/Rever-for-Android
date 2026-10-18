@@ -10,3 +10,4 @@ local.properties
 signing/
 *.jks
 *.keystore
+/AGENTS.md

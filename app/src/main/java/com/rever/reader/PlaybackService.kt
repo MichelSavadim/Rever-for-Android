@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -26,17 +27,45 @@ class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
     private lateinit var player: ExoPlayer
     private val worker = Executors.newSingleThreadExecutor()
+    private val storageWorker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
+    private val syncStorage = Runnable {
+        if (!storageWorker.isShutdown) storageWorker.execute {
+            try { LibraryLocation(this).sync() }
+            catch (error: Exception) { Log.e("ReverStorage", "Falha ao sincronizar áudios", error) }
+        }
+    }
     private var bookFolder: File? = null
     private var paragraphs: List<Paragraph> = emptyList()
     private var voice = AndroidTts.DEFAULT_LANGUAGE
     private var preparing = -1
     private var token = 0
+    private val readingStats by lazy { ReadingStats(this) }
+    private var narrationStartedAt = 0L
+    private val durationFlush = object : Runnable {
+        override fun run() {
+            flushNarrationTime()
+            main.postDelayed(this, 15_000)
+        }
+    }
+
+    private fun flushNarrationTime() {
+        val started = narrationStartedAt
+        if (started == 0L) return
+        narrationStartedAt = if (player.isPlaying) SystemClock.elapsedRealtime() else 0L
+        bookFolder?.name?.let {
+            readingStats.addDuration(it, "narration_ms", SystemClock.elapsedRealtime() - started)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         player = ExoPlayer.Builder(this).build()
         player.addListener(object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                flushNarrationTime()
+                narrationStartedAt = if (isPlaying) SystemClock.elapsedRealtime() else 0L
+            }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 val current = mediaItem?.mediaId?.toIntOrNull() ?: return
                 main.post {
@@ -51,15 +80,22 @@ class PlaybackService : MediaSessionService() {
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) {
-                    player.currentMediaItem?.mediaId?.toIntOrNull()?.let(::prepareNext)
+                    player.currentMediaItem?.mediaId?.toIntOrNull()?.let { current ->
+                        if ((current + 1 until paragraphs.size).none {
+                            NarrationFiles.hasSpeech(paragraphs[it].text)
+                        }) bookFolder?.name?.let(readingStats::markCompleted)
+                        prepareNext(current)
+                    }
                 }
             }
         })
         session = MediaSession.Builder(this, player).build()
+        main.postDelayed(durationFlush, 15_000)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CLEAR) {
+            flushNarrationTime()
             token++
             val old = bookFolder
             bookFolder = null
@@ -68,6 +104,8 @@ class PlaybackService : MediaSessionService() {
             player.pause()
             player.clearMediaItems()
             old?.let { folder -> worker.execute { clearTemporary(folder) } }
+            main.removeCallbacks(syncStorage)
+            main.postDelayed(syncStorage, 5_000)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -76,6 +114,7 @@ class PlaybackService : MediaSessionService() {
             if (id?.matches(Regex("[a-f0-9]{20}")) == true) {
                 val folder = File(File(filesDir, "library"), id)
                 if (folder.isDirectory) {
+                    flushNarrationTime()
                     val old = bookFolder
                     token++
                     bookFolder = folder
@@ -108,6 +147,8 @@ class PlaybackService : MediaSessionService() {
                 if (path == null) {
                     path = NarrationFiles.temporary(folder, activeVoice, paragraph)
                     AndroidTts.generate(this, paragraph, path, activeVoice)
+                    main.removeCallbacks(syncStorage)
+                    main.postDelayed(syncStorage, 5_000)
                 }
             } catch (e: Exception) {
                 error = e
@@ -161,8 +202,12 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
     override fun onDestroy() {
+        main.removeCallbacks(durationFlush)
+        main.removeCallbacks(syncStorage)
+        flushNarrationTime()
         token++
         worker.shutdown()
+        storageWorker.shutdown()
         session?.let {
             it.player.release()
             it.release()

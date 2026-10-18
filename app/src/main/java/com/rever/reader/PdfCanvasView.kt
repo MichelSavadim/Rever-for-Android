@@ -217,6 +217,13 @@ class PdfCanvasView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun clearRenderCache() {
+        generation++
+        pending.clear()
+        cache.evictAll()
+        invalidate()
+    }
+
     fun setHighlight(page: Int, box: RectF?) {
         selectedPage = page
         selectedBox = box

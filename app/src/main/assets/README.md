@@ -2,6 +2,8 @@
 
 O Rever é um leitor de PDF com narração local pelo mecanismo de voz instalado no Android. Ele gera MP3 para cada parágrafo durante a reprodução e também permite exportar o áudio do PDF inteiro ou de um intervalo de páginas.
 
+Na versão 1.1.0, **Configurações → Dados e Armazenamento** permite escolher a pasta principal, criar ou restaurar backups, ajustar o backup automático e limpar o cache. Backups automáticos são salvos em Downloads/Rever/Backups. **Estatísticas** mostra o tempo de leitura e narração, livros e páginas acessados. As opções de idioma e voz ficam em **Narração**.
+
 ## Biblioteca
 
 Toque em **+ Adicionar PDF** para importar um arquivo. PDFs com texto selecionável são aceitos; o suporte a documentos digitalizados ainda depende de OCR. Segure um PDF para selecioná-lo. Enquanto há uma seleção, você pode abrir, renomear, compartilhar, apagar ou atribuir categorias. Toque em outros PDFs para selecioná-los em conjunto.

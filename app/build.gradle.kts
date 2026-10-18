@@ -12,8 +12,8 @@ android {
         applicationId = "com.rever.reader"
         minSdk = 34
         targetSdk = 34
-        versionCode = 10000
-        versionName = "1.0.0"
+        versionCode = 10100
+        versionName = "1.1.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -46,5 +46,7 @@ dependencies {
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-session:1.11.1")
+    implementation("androidx.documentfile:documentfile:1.1.0")
+    implementation("androidx.work:work-runtime:2.12.0")
     implementation("com.github.axet:lame:1.0.9")
 }

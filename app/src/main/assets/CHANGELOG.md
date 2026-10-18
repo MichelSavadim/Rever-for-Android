@@ -1,6 +1,6 @@
-Rever para Android 1.0.0
+Rever para Android 1.1.0
 
-• Atualizações pelo próprio aplicativo, com aviso de nova versão e opção de ignorá-la.
-• Categorias para organizar a biblioteca e atribuir vários PDFs.
-• Zoom por pinça centrado no ponto tocado.
-• Menor uso de memória e navegação mais leve em PDFs extensos.
+• Nova tela Dados e Armazenamento: pasta de dados, backup manual e automático, uso de espaço e limpeza de cache.
+• Backup automático em Downloads/Rever/Backups, com frequência ajustável.
+• Nova tela Estatísticas: tempo de leitura e narração, PDFs iniciados e completos, páginas e narrações salvas.
+• Idioma, voz e instalação de vozes agora ficam reunidos em Narração.
