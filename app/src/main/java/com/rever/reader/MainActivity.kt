@@ -580,6 +580,7 @@ class MainActivity : Activity() {
         playButton.text = "…"
         val bookId = book.id
         val voice = currentVoice()
+        CrashReporter.markNarration(this, bookId, paragraph, "initial_tts")
         io.execute {
             try {
                 val path = NarrationFiles.playable(book.folder, voice, paragraph)
@@ -1012,6 +1013,7 @@ class MainActivity : Activity() {
             showCategories()
         })
         screen.addView(button("Mensagens") { showMessages() })
+        screen.addView(button("Relatórios de falha") { showCrashReports() })
         screen.addView(button("Sobre") { showAbout() })
         setContentView(screen)
     }
@@ -1562,7 +1564,25 @@ class MainActivity : Activity() {
     }
 
     private fun installedVersion(): String =
-        packageManager.getPackageInfo(packageName, 0).versionName ?: "1.1.0"
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "1.1.1"
+
+    private fun showCrashReports() {
+        val reports = CrashReporter.reports(this)
+        if (reports.isEmpty()) {
+            AlertDialog.Builder(this).setTitle("Relatórios de falha")
+                .setMessage("Nenhuma falha foi registrada neste aparelho.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Relatórios de falha")
+            .setItems(reports.map { it.name }.toTypedArray()) { _, index ->
+                val report = reports[index]
+                AlertDialog.Builder(this).setTitle(report.name)
+                    .setItems(arrayOf("Salvar arquivo", "Compartilhar arquivo")) { _, action ->
+                        if (action == 0) saveFile(report) else shareFile(report)
+                    }.show()
+            }.setNegativeButton("Fechar", null).show()
+    }
 
     private fun releaseDate(value: String): String = try {
         Instant.parse(value).atZone(ZoneId.systemDefault())
@@ -2732,7 +2752,9 @@ class MainActivity : Activity() {
     private fun saveFile(source: File) {
         pendingExportSave = source
         val mime = if (source.extension.equals("pdf", true)) "application/pdf"
-            else if (source.extension.equals("mp3", true)) "audio/mpeg" else "application/octet-stream"
+            else if (source.extension.equals("mp3", true)) "audio/mpeg"
+            else if (source.extension.equals("log", true) || source.extension.equals("trace", true)) "text/plain"
+            else "application/octet-stream"
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = mime
@@ -2743,7 +2765,9 @@ class MainActivity : Activity() {
     private fun shareFile(source: File) {
         val uri = FileProvider.getUriForFile(this, "$packageName.files", source)
         val mime = if (source.extension.equals("pdf", true)) "application/pdf"
-            else if (source.extension.equals("mp3", true)) "audio/mpeg" else "application/octet-stream"
+            else if (source.extension.equals("mp3", true)) "audio/mpeg"
+            else if (source.extension.equals("log", true) || source.extension.equals("trace", true)) "text/plain"
+            else "application/octet-stream"
         startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
             type = mime
             putExtra(Intent.EXTRA_STREAM, uri)

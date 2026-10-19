@@ -94,13 +94,16 @@ object AndroidTts {
             }
         })
         try {
+            CrashReporter.markStage(context, "synthesizing_wav")
             check(tts.synthesizeToFile(paragraph.text, Bundle(), partial, utterance) == TextToSpeech.SUCCESS) {
                 "A voz do Android recusou a geração do áudio."
             }
             check(finished.await(90, TimeUnit.SECONDS)) { "A voz do Android demorou demais para gerar o áudio." }
             failure.get()?.let { throw IllegalStateException(it) }
             check(partial.isFile && partial.length() > 44L) { "A voz do Android criou um arquivo de áudio vazio." }
+            CrashReporter.markStage(context, "encoding_mp3")
             WavToMp3.convert(partial, output)
+            CrashReporter.markStage(context, "mp3_ready")
         } finally {
             partial.delete()
         }

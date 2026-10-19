@@ -27,6 +27,7 @@ class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
     private lateinit var player: ExoPlayer
     private val worker = Executors.newSingleThreadExecutor()
+    private val indexWorker = Executors.newSingleThreadExecutor()
     private val storageWorker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val syncStorage = Runnable {
@@ -119,7 +120,21 @@ class PlaybackService : MediaSessionService() {
                     token++
                     bookFolder = folder
                     if (old != null && old != folder) worker.execute { clearTemporary(old) }
-                    paragraphs = try { NarrationFiles.paragraphs(folder) } catch (_: Exception) { emptyList() }
+                    paragraphs = emptyList()
+                    val configuredToken = token
+                    indexWorker.execute {
+                        val loaded = try { NarrationFiles.paragraphs(folder) }
+                            catch (error: Exception) {
+                                Log.e("ReverPlayback", "Falha ao carregar índice de narração", error)
+                                emptyList()
+                            }
+                        main.post {
+                            if (configuredToken == token && bookFolder == folder) {
+                                paragraphs = loaded
+                                player.currentMediaItem?.mediaId?.toIntOrNull()?.let(::prepareNext)
+                            }
+                        }
+                    }
                     voice = intent.getStringExtra(EXTRA_VOICE) ?: AndroidTts.DEFAULT_LANGUAGE
                     preparing = -1
                     player.currentMediaItem?.mediaId?.toIntOrNull()?.let(::prepareNext)
@@ -139,6 +154,7 @@ class PlaybackService : MediaSessionService() {
         val activeToken = token
         val activeVoice = voice
         val paragraph = paragraphs[next]
+        CrashReporter.markNarration(this, folder.name, paragraph, "next_tts")
         worker.execute {
             var path: File? = null
             var error: Exception? = null
@@ -207,6 +223,7 @@ class PlaybackService : MediaSessionService() {
         flushNarrationTime()
         token++
         worker.shutdown()
+        indexWorker.shutdown()
         storageWorker.shutdown()
         session?.let {
             it.player.release()

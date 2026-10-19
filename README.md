@@ -1,6 +1,8 @@
 # Rever para Android
 
-Leitor de PDF com narração local pelo TTS do Android e exportação de áudio em MP3. A versão 1.1.0 foi preparada para Android 14. A biblioteca, os parágrafos, o ponto de leitura, as categorias e os áudios ficam no armazenamento interno do aplicativo ou na pasta escolhida em **Dados e Armazenamento**. O Android exige uma cópia de trabalho interna para abrir PDFs e gerar áudio quando uma pasta externa é escolhida.
+Leitor de PDF com narração local pelo TTS do Android e exportação de áudio em MP3. A versão 1.1.1 foi preparada para Android 14. A biblioteca, os parágrafos, o ponto de leitura, as categorias e os áudios ficam no armazenamento interno do aplicativo ou na pasta escolhida em **Dados e Armazenamento**. O Android exige uma cópia de trabalho interna para abrir PDFs e gerar áudio quando uma pasta externa é escolhida.
+
+Em **Configurações → Relatórios de falha**, é possível salvar ou compartilhar os logs gerados após um fechamento inesperado. O Rever registra exceções Java e consulta os motivos de encerramento preservados pelo Android na próxima abertura. Quando disponível, o rastro de falha nativa acompanha o log em um arquivo `.pb`.
 
 ## Dados, backup e estatísticas
 

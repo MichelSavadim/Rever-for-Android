@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application
+        android:name=".ReverApplication"
         android:allowBackup="false"
         android:icon="@drawable/rever"
         android:label="Rever"

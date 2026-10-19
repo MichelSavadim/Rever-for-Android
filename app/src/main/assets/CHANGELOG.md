@@ -1,6 +1,5 @@
-Rever para Android 1.1.0
+Rever para Android 1.1.1
 
-• Nova tela Dados e Armazenamento: pasta de dados, backup manual e automático, uso de espaço e limpeza de cache.
-• Backup automático em Downloads/Rever/Backups, com frequência ajustável.
-• Nova tela Estatísticas: tempo de leitura e narração, PDFs iniciados e completos, páginas e narrações salvas.
-• Idioma, voz e instalação de vozes agora ficam reunidos em Narração.
+• A narração de livros grandes carrega apenas o índice compacto dos parágrafos, fora da interface.
+• Relatórios de falha podem ser salvos ou compartilhados em Configurações.
+• Os relatórios registram o estágio da síntese e os encerramentos informados pelo Android para facilitar a investigação de falhas.

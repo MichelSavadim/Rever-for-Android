@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <files-path name="library" path="library/" />
+    <files-path name="crash_reports" path="crash_reports/" />
     <cache-path name="updates" path="updates/" />
 </paths>
