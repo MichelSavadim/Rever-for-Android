@@ -176,6 +176,7 @@ class MainActivity : Activity() {
     private var bookLoadToken = 0
     private var restoringReaderPage = false
     private var paragraphs: List<Paragraph> = emptyList()
+    private var ignoredTexts: Set<String> = emptySet()
     private var searchParagraphs: List<Paragraph>? = null
     private var searchLoading = false
     private val searchCallbacks = mutableListOf<() -> Unit>()
@@ -217,6 +218,8 @@ class MainActivity : Activity() {
                     selectedParagraph = if (selectedParagraph?.page == hit.page &&
                         selectedParagraph?.index == hit.index) null else hit
                     refreshHighlight()
+                    if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+                        selectedParagraph?.let(::followParagraph)
                     saveReaderState()
                 }
             }
@@ -498,7 +501,7 @@ class MainActivity : Activity() {
                             audioParagraphIndex = index
                             selectedParagraph = paragraphs[index]
                             refreshHighlight()
-                            viewer.showPage(paragraphs[index].page)
+                            followParagraph(paragraphs[index])
                             saveReaderState()
                         }
                     }
@@ -563,15 +566,15 @@ class MainActivity : Activity() {
             return
         }
         val start = if (selectedIndex >= 0) selectedIndex else paragraphs.indexOfFirst { it.page >= currentPage }
-        if (start >= 0) startParagraph(start)
+        if (start >= 0) startParagraph(start, manual = selectedIndex >= 0)
     }
 
-    private fun startParagraph(index: Int) {
+    private fun startParagraph(index: Int, manual: Boolean = false) {
         val book = activeBook ?: return
         val paragraph = paragraphs.getOrNull(index) ?: return
-        if (!NarrationFiles.hasSpeech(paragraph.text)) {
+        if (!NarrationFiles.hasSpeech(paragraph.text) || (!manual && paragraph.text in ignoredTexts)) {
             val next = ((index + 1) until paragraphs.size).firstOrNull {
-                NarrationFiles.hasSpeech(paragraphs[it].text)
+                NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
             }
             if (next != null) startParagraph(next)
             return
@@ -611,7 +614,7 @@ class MainActivity : Activity() {
                         selectedParagraph = paragraph
                         audioParagraphIndex = index
                         refreshHighlight()
-                        viewer.showPage(paragraph.page)
+                        followParagraph(paragraph)
                         saveReaderState()
                     }
                     playButton.isEnabled = true
@@ -636,7 +639,11 @@ class MainActivity : Activity() {
         val current = mediaController?.currentMediaItem?.mediaId?.toIntOrNull()
             ?: paragraphs.indexOfFirst { it == selectedParagraph }.takeIf { it >= 0 }
             ?: paragraphs.indexOfFirst { it.page >= currentPage }
-        val target = (current + delta).coerceIn(0, paragraphs.lastIndex)
+        val target = (if (delta >= 0) ((current + 1)..paragraphs.lastIndex).firstOrNull {
+            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+        } else if (current > 0) (current - 1 downTo 0).firstOrNull {
+            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+        } else null) ?: return
         if (target in paragraphs.indices) startParagraph(target)
     }
 
@@ -644,7 +651,11 @@ class MainActivity : Activity() {
         val current = mediaController?.currentMediaItem?.mediaId?.toIntOrNull()
             ?.let { paragraphs.getOrNull(it)?.page } ?: currentPage
         val targetPage = current + delta
-        val target = paragraphs.indexOfFirst { it.page == targetPage }
+        val target = if (delta >= 0) paragraphs.indexOfFirst {
+            it.page >= targetPage && NarrationFiles.automaticSpeech(it, ignoredTexts)
+        } else paragraphs.indexOfLast {
+            it.page <= targetPage && NarrationFiles.automaticSpeech(it, ignoredTexts)
+        }
         if (target >= 0) startParagraph(target)
     }
 
@@ -788,6 +799,7 @@ class MainActivity : Activity() {
             viewer.closeDocument()
             activeBook = null
             paragraphs = emptyList()
+            ignoredTexts = emptySet()
             timeline = null
             selectedParagraph = null
             searchActive = false
@@ -1564,7 +1576,7 @@ class MainActivity : Activity() {
     }
 
     private fun installedVersion(): String =
-        packageManager.getPackageInfo(packageName, 0).versionName ?: "1.1.1"
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "1.1.2"
 
     private fun showCrashReports() {
         val reports = CrashReporter.reports(this)
@@ -2019,7 +2031,9 @@ class MainActivity : Activity() {
             .setPositiveButton("Reproduzir") { _, _ ->
                 val pageNumber = input.text.toString().toIntOrNull()
                 if (pageNumber != null && pageNumber in 1..book.pageCount) {
-                    val index = paragraphs.indexOfFirst { it.page >= pageNumber && NarrationFiles.hasSpeech(it.text) }
+                    val index = paragraphs.indexOfFirst {
+                        it.page >= pageNumber && NarrationFiles.automaticSpeech(it, ignoredTexts)
+                    }
                     if (index >= 0) startParagraph(index)
                 }
             }
@@ -2246,7 +2260,8 @@ class MainActivity : Activity() {
                 .put("paragraph_version", ParagraphExtractor.VERSION)
                 .put("added_at", addedAt).put("last_read_at", 0L).toString())
             if (categoryId != null) categoryStore.assign(folder, setOf(categoryId))
-            val initialTiming = DurationTimeline.load(folder, extracted, currentVoice())
+            val initialTiming = DurationTimeline.load(folder, extracted, currentVoice(),
+                NarrationFiles.ignored(folder, extracted))
             writeTextAtomic(initialTiming.file, initialTiming.snapshot())
             queueStorageSync()
             return Book(id, title, count, folder, addedAt, 0L)
@@ -2335,6 +2350,7 @@ class MainActivity : Activity() {
             activeBook = book
             readingStats.markOpened(book.id)
             paragraphs = emptyList()
+            ignoredTexts = emptySet()
             searchParagraphs = null
             searchLoading = false
             searchCallbacks.clear()
@@ -2370,10 +2386,14 @@ class MainActivity : Activity() {
             showPageControls()
             root.post {
                 if (loadToken == bookLoadToken && activeBook?.id == book.id) {
-                    viewer.showPage(savedPage)
-                    currentPage = savedPage
+                    val selection = selectedParagraph
+                    if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+                        selection != null && !selection.box.isEmpty) followParagraph(selection)
+                    else viewer.showPage(savedPage)
+                    currentPage = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+                        selection != null && !selection.box.isEmpty) selection.page else savedPage
                     restoringReaderPage = false
-                    readingStats.markPage(book.id, savedPage, book.pageCount)
+                    readingStats.markPage(book.id, currentPage, book.pageCount)
                     updatePageLabel()
                     if (rebuildParagraphs || paragraphs.isNotEmpty()) saveReaderState()
                 }
@@ -2390,15 +2410,19 @@ class MainActivity : Activity() {
                         writeTextAtomic(File(book.folder, "book.json"), metadata.toString())
                         extracted
                     } else loadParagraphs(book)
+                    val ignored = NarrationFiles.ignored(book.folder, loaded)
                     runOnUiThread {
                         if (loadToken == bookLoadToken && activeBook?.id == book.id) {
                             paragraphs = loaded
+                            ignoredTexts = ignored
                             selectedParagraph = savedParagraph?.let { reference ->
                                 loaded.firstOrNull {
                                     it.page == reference.optInt("page") && it.index == reference.optInt("index")
                                 }
                             }
                             refreshHighlight()
+                            if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+                                !centerSelectionAfterRotation) selectedParagraph?.let(::followParagraph)
                             if (centerSelectionAfterRotation) {
                                 selectedParagraph?.let { viewer.centerOn(it.page, it.box) }
                                 centerSelectionAfterRotation = false
@@ -2409,7 +2433,7 @@ class MainActivity : Activity() {
                         }
                     }
                     val timelineVoice = currentVoice()
-                    val loadedTimeline = DurationTimeline.load(book.folder, loaded, timelineVoice)
+                    val loadedTimeline = DurationTimeline.load(book.folder, loaded, timelineVoice, ignored)
                     writeTextAtomic(loadedTimeline.file, loadedTimeline.snapshot())
                     runOnUiThread {
                         if (loadToken == bookLoadToken && activeBook?.id == book.id) {
@@ -2459,6 +2483,12 @@ class MainActivity : Activity() {
         val playing = if (mediaController?.isPlaying == true) paragraphs.getOrNull(audioParagraphIndex) else null
         val highlighted = playing ?: if (searchActive) null else selectedParagraph
         viewer.setHighlight(highlighted?.page ?: 0, highlighted?.box)
+    }
+
+    private fun followParagraph(paragraph: Paragraph) {
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+            !paragraph.box.isEmpty) viewer.centerOn(paragraph.page, paragraph.box)
+        else viewer.showPage(paragraph.page)
     }
 
     private fun loadParagraphs(book: Book): List<Paragraph> {
@@ -2555,7 +2585,7 @@ class MainActivity : Activity() {
         timeline = null
         renderAudioTime()
         io.execute {
-            val updated = DurationTimeline.load(book.folder, loadedParagraphs, voice)
+            val updated = DurationTimeline.load(book.folder, loadedParagraphs, voice, ignoredTexts)
             writeTextAtomic(updated.file, updated.snapshot())
             runOnUiThread {
                 if (loadToken == bookLoadToken && activeBook?.id == book.id && currentVoice() == voice) {
@@ -2626,7 +2656,9 @@ class MainActivity : Activity() {
 
     private fun startExport(book: Book, first: Int, last: Int) {
         val voice = currentVoice()
-        val entries = paragraphs.filter { it.page in first..last && NarrationFiles.hasSpeech(it.text) }
+        val entries = paragraphs.filter {
+            it.page in first..last && NarrationFiles.automaticSpeech(it, ignoredTexts)
+        }
         if (entries.isEmpty()) {
             Toast.makeText(this, "Esse intervalo não contém texto narrável.", Toast.LENGTH_LONG).show()
             return

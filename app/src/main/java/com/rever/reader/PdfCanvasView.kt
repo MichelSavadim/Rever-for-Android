@@ -1,7 +1,9 @@
 package com.rever.reader
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BlendMode
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
@@ -26,7 +28,8 @@ import kotlin.math.sqrt
 class PdfCanvasView(context: Context) : View(context) {
     private val background = Paint().apply { color = Color.rgb(231, 234, 239) }
     private val paper = Paint().apply { color = Color.WHITE }
-    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    // White page pixels reveal the marker below; dark glyphs keep their original ink color.
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply { blendMode = BlendMode.MULTIPLY }
     private val highlightPaint = Paint().apply { color = 0x69FFD700 }
     private val searchPaint = Paint().apply { color = 0x66FF9800 }
     private val cache = object : LruCache<Int, Bitmap>(24 * 1024 * 1024) {
@@ -51,6 +54,7 @@ class PdfCanvasView(context: Context) : View(context) {
     private var lastScaleFocusY = 0f
     private val margin = 16f * resources.displayMetrics.density
     private val gap = 14f * resources.displayMetrics.density
+    private val highlightRise = 3f * resources.displayMetrics.density
     var onPageTap: ((page: Int, x: Float, y: Float) -> Unit)? = null
     var onVisiblePageChanged: ((page: Int) -> Unit)? = null
     var onViewportMoved: (() -> Unit)? = null
@@ -288,6 +292,20 @@ class PdfCanvasView(context: Context) : View(context) {
                 canvas.drawRect(pageRect, paper)
                 val bitmap = cache.get(index)
                 val desiredWidth = safeBitmapWidth(index, min(2048, max(512, pageWidth.toInt())))
+                if (selectedPage == index + 1) {
+                    selectedBox?.let { box ->
+                        canvas.save()
+                        canvas.clipRect(pageRect)
+                        canvas.drawRect(
+                            left + box.left * pageWidth / size.first,
+                            y + box.top * pageHeight / size.second - highlightRise,
+                            left + box.right * pageWidth / size.first,
+                            y + box.bottom * pageHeight / size.second - highlightRise,
+                            highlightPaint
+                        )
+                        canvas.restore()
+                    }
+                }
                 if (bitmap != null && !bitmap.isRecycled) {
                     canvas.drawBitmap(bitmap, null, pageRect, bitmapPaint)
                     if (bitmap.width < desiredWidth * 0.75f) requestPage(index, desiredWidth)
@@ -302,17 +320,6 @@ class PdfCanvasView(context: Context) : View(context) {
                         y + box.bottom * pageHeight / size.second,
                         searchPaint
                     )
-                }
-                if (selectedPage == index + 1) {
-                    selectedBox?.let { box ->
-                        canvas.drawRect(
-                            left + box.left * pageWidth / size.first,
-                            y + box.top * pageHeight / size.second,
-                            left + box.right * pageWidth / size.first,
-                            y + box.bottom * pageHeight / size.second,
-                            highlightPaint
-                        )
-                    }
                 }
             }
             y += pageHeight + gap
@@ -384,8 +391,11 @@ class PdfCanvasView(context: Context) : View(context) {
         }
     }
 
+    private fun edgeSpace(): Float = if (resources.configuration.orientation ==
+        Configuration.ORIENTATION_LANDSCAPE) max(margin, height / 2f) else margin
+
     private fun pageTop(index: Int, fitWidth: Float = max(1f, width - 2 * margin) * zoom): Float =
-        (margin + fitWidth * heightRatios[index] + gap * index).toFloat()
+        (edgeSpace() + fitWidth * heightRatios[index] + gap * index).toFloat()
 
     private fun pageIndexAt(contentY: Float, fitWidth: Float): Int {
         if (sizes.isEmpty()) return 0
@@ -403,7 +413,8 @@ class PdfCanvasView(context: Context) : View(context) {
     private fun maxScroll(): Float {
         if (sizes.isEmpty()) return 0f
         val last = sizes.last()
-        val total = pageTop(sizes.lastIndex) + max(1f, width - 2 * margin) * zoom * last.second / last.first + margin
+        val total = pageTop(sizes.lastIndex) + max(1f, width - 2 * margin) * zoom *
+            last.second / last.first + edgeSpace()
         return max(0f, total - height)
     }
 

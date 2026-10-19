@@ -135,6 +135,7 @@ object ParagraphExtractor {
             check(fullTemp.renameTo(full) && indexTemp.renameTo(index)) {
                 "Não foi possível salvar os parágrafos."
             }
+            NarrationFiles.rebuildIgnored(folder, compact)
             return compact
         } finally {
             fullTemp.delete()

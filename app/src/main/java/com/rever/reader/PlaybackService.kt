@@ -38,6 +38,7 @@ class PlaybackService : MediaSessionService() {
     }
     private var bookFolder: File? = null
     private var paragraphs: List<Paragraph> = emptyList()
+    private var ignoredTexts: Set<String> = emptySet()
     private var voice = AndroidTts.DEFAULT_LANGUAGE
     private var preparing = -1
     private var token = 0
@@ -83,7 +84,7 @@ class PlaybackService : MediaSessionService() {
                 if (playbackState == Player.STATE_ENDED) {
                     player.currentMediaItem?.mediaId?.toIntOrNull()?.let { current ->
                         if ((current + 1 until paragraphs.size).none {
-                            NarrationFiles.hasSpeech(paragraphs[it].text)
+                            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
                         }) bookFolder?.name?.let(readingStats::markCompleted)
                         prepareNext(current)
                     }
@@ -101,6 +102,7 @@ class PlaybackService : MediaSessionService() {
             val old = bookFolder
             bookFolder = null
             paragraphs = emptyList()
+            ignoredTexts = emptySet()
             preparing = -1
             player.pause()
             player.clearMediaItems()
@@ -121,6 +123,7 @@ class PlaybackService : MediaSessionService() {
                     bookFolder = folder
                     if (old != null && old != folder) worker.execute { clearTemporary(old) }
                     paragraphs = emptyList()
+                    ignoredTexts = emptySet()
                     val configuredToken = token
                     indexWorker.execute {
                         val loaded = try { NarrationFiles.paragraphs(folder) }
@@ -128,9 +131,15 @@ class PlaybackService : MediaSessionService() {
                                 Log.e("ReverPlayback", "Falha ao carregar índice de narração", error)
                                 emptyList()
                             }
+                        val ignored = try { NarrationFiles.ignored(folder, loaded) }
+                            catch (error: Exception) {
+                                Log.e("ReverPlayback", "Falha ao carregar parágrafos ignorados", error)
+                                NarrationFiles.repeatedTexts(loaded)
+                            }
                         main.post {
                             if (configuredToken == token && bookFolder == folder) {
                                 paragraphs = loaded
+                                ignoredTexts = ignored
                                 player.currentMediaItem?.mediaId?.toIntOrNull()?.let(::prepareNext)
                             }
                         }
@@ -148,7 +157,7 @@ class PlaybackService : MediaSessionService() {
         val folder = bookFolder ?: return
         if (preparing >= 0 || player.mediaItemCount > player.currentMediaItemIndex + 1) return
         val next = ((current + 1) until paragraphs.size).firstOrNull {
-            NarrationFiles.hasSpeech(paragraphs[it].text)
+            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
         } ?: return
         preparing = next
         val activeToken = token

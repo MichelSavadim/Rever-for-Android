@@ -1,5 +1,5 @@
-Rever para Android 1.1.1
+Rever para Android 1.1.2
 
-• A narração de livros grandes carrega apenas o índice compacto dos parágrafos, fora da interface.
-• Relatórios de falha podem ser salvos ou compartilhados em Configurações.
-• Os relatórios registram o estágio da síntese e os encerramentos informados pelo Android para facilitar a investigação de falhas.
+• O destaque do parágrafo foi deslocado levemente para cima e fica atrás das letras do PDF.
+• Parágrafos com texto idêntico repetido mais de 15 vezes são ignorados na reprodução automática e na exportação de áudio; ainda podem ser escolhidos manualmente.
+• Na horizontal, o parágrafo selecionado permanece centralizado ao avançar a narração.

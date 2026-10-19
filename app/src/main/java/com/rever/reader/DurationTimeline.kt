@@ -68,25 +68,29 @@ class DurationTimeline private constructor(
     }
 
     companion object {
-        private const val VERSION = 3
+        private const val VERSION = 4
         private val word = Regex("[\\p{L}\\p{N}]+")
 
-        fun load(folder: File, paragraphs: List<Paragraph>, voice: String): DurationTimeline {
+        fun load(folder: File, paragraphs: List<Paragraph>, voice: String,
+                 ignored: Set<String>): DurationTimeline {
             val file = File(folder, "timing.json")
             val saved = try { if (file.isFile) JSONObject(file.readText(Charsets.UTF_8)) else JSONObject() }
                 catch (_: Exception) { JSONObject() }
-            val valid = saved.optInt("version") == VERSION &&
+            val compatible =
                 saved.optInt("paragraph_version") == ParagraphExtractor.VERSION &&
                 saved.optJSONArray("base_ms")?.length() == paragraphs.size
+            val valid = compatible && saved.optInt("version") == VERSION
             val base = if (valid) {
                 val stored = saved.getJSONArray("base_ms")
                 LongArray(paragraphs.size) { stored.optLong(it).coerceAtLeast(0L) }
-            } else LongArray(paragraphs.size) { estimate(paragraphs[it].text) }
+            } else LongArray(paragraphs.size) { index ->
+                if (paragraphs[index].text in ignored) 0L else estimate(paragraphs[index].text)
+            }
             val data = if (valid) saved else JSONObject()
                 .put("version", VERSION)
                 .put("paragraph_version", ParagraphExtractor.VERSION)
                 .put("base_ms", JSONArray().apply { base.forEach { put(it) } })
-                .put("voices", JSONObject())
+                .put("voices", if (compatible) saved.optJSONObject("voices") ?: JSONObject() else JSONObject())
             val values = data.optJSONObject("voices")?.optJSONObject(voice)
             val actual = mutableMapOf<Int, Long>()
             values?.keys()?.forEach { key ->
