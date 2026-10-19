@@ -95,6 +95,10 @@ class MainActivity : Activity() {
     private val createBackupRequest = 1104
     private val restoreBackupRequest = 1105
     private val io = Executors.newSingleThreadExecutor()
+    private val searchWorker = Executors.newSingleThreadExecutor()
+    private val searchHandler = Handler(Looper.getMainLooper())
+    @Volatile private var searchToken = 0
+    private var pendingSearch: Runnable? = null
     private val backup by lazy { ReverBackup(this) }
     private val location by lazy { LibraryLocation(this) }
     private val storageHandler = Handler(Looper.getMainLooper())
@@ -177,9 +181,6 @@ class MainActivity : Activity() {
     private var restoringReaderPage = false
     private var paragraphs: List<Paragraph> = emptyList()
     private var ignoredTexts: Set<String> = emptySet()
-    private var searchParagraphs: List<Paragraph>? = null
-    private var searchLoading = false
-    private val searchCallbacks = mutableListOf<() -> Unit>()
     private var selectedParagraph: Paragraph? = null
     private var centerSelectionAfterRotation = false
     private val hidePageControls = Runnable { pageControls.visibility = View.GONE }
@@ -248,13 +249,13 @@ class MainActivity : Activity() {
         val searchStatus = TextView(this).apply { textSize = 12f; setTextColor(textColor()) }
         readerSearchInput = searchInput
         readerSearchStatus = searchStatus
-        var searchMatches: List<Paragraph> = emptyList()
+        var searchMatches: List<Int> = emptyList()
         var searchIndex = -1
         val moveMatch: (Int) -> Unit = { delta ->
             if (searchMatches.isNotEmpty()) {
                 searchIndex = (searchIndex + delta + searchMatches.size) % searchMatches.size
                 val match = searchMatches[searchIndex]
-                viewer.showPage(match.page)
+                viewer.showPage(match)
                 searchStatus.text = "${searchIndex + 1}/${searchMatches.size}"
             }
         }
@@ -262,19 +263,27 @@ class MainActivity : Activity() {
             val query = queryText.trim()
             val term = query.replace(Regex("\\s+"), " ")
             searchActive = query.isNotEmpty()
-            if (query.isNotEmpty() && searchParagraphs == null) {
-                searchStatus.text = "Carregando pesquisa…"
-                requestSearchParagraphs { updateReaderSearch(searchInput.text.toString()) }
+            searchIndex = -1
+            searchMatches = emptyList()
+            viewer.setSearchBoxes(emptyMap())
+            refreshHighlight()
+            if (term.isEmpty()) {
+                cancelSearch()
+                searchStatus.text = "0"
                 return
             }
-            searchMatches = if (query.isEmpty()) emptyList() else searchParagraphs.orEmpty().filter {
-                it.text.contains(term, ignoreCase = true) && it.matchBoxes(term).isNotEmpty()
+            searchStatus.text = "Pesquisando…"
+            queueSearch(term) { result ->
+                if (searchRow.visibility != View.VISIBLE || searchInput.text.toString().trim() != query) return@queueSearch
+                if (result == null) {
+                    searchStatus.text = "Falha na pesquisa"
+                    return@queueSearch
+                }
+                searchMatches = result.pages
+                viewer.setSearchBoxes(result.boxes)
+                searchStatus.text = "${searchMatches.size}"
+                if (searchMatches.isNotEmpty()) moveMatch(1)
             }
-            searchIndex = -1
-            viewer.setSearchMatches(searchMatches, term)
-            refreshHighlight()
-            searchStatus.text = "${searchMatches.size}"
-            if (searchMatches.isNotEmpty()) moveMatch(1)
         }
         searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -769,8 +778,9 @@ class MainActivity : Activity() {
         (viewer.layoutParams as FrameLayout.LayoutParams).topMargin = height
         viewer.requestLayout()
         if (!showing) {
+            cancelSearch()
             searchActive = false
-            viewer.setSearchMatches(emptyList(), "")
+            viewer.setSearchBoxes(emptyMap())
             refreshHighlight()
         }
     }
@@ -802,6 +812,7 @@ class MainActivity : Activity() {
             ignoredTexts = emptySet()
             timeline = null
             selectedParagraph = null
+            cancelSearch()
             searchActive = false
             audioParagraphIndex = -1
         }
@@ -2051,14 +2062,14 @@ class MainActivity : Activity() {
         val input = EditText(this).apply { hint = "Texto a procurar"; isSingleLine = true }
         val status = TextView(this).apply { textSize = 14f; setTextColor(Color.DKGRAY) }
         val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        var matches: List<Paragraph> = emptyList()
+        var matches: List<Int> = emptyList()
         var pointer = -1
         val showMatch = { index: Int ->
             if (matches.isNotEmpty()) {
                 pointer = (index + matches.size) % matches.size
                 val match = matches[pointer]
                 mediaController?.pause()
-                viewer.showPage(match.page)
+                viewer.showPage(match)
                 status.text = "${pointer + 1} de ${matches.size} resultados"
             }
         }
@@ -2066,18 +2077,26 @@ class MainActivity : Activity() {
         controls.addView(button("Próximo") { showMatch(pointer + 1) })
         fun updatePanelSearch(queryText: String) {
             val query = queryText.trim()
-            if (query.isNotEmpty() && searchParagraphs == null) {
-                status.text = "Carregando pesquisa…"
-                requestSearchParagraphs { updatePanelSearch(input.text.toString()) }
+            pointer = -1
+            matches = emptyList()
+            viewer.setSearchBoxes(emptyMap())
+            if (query.isEmpty()) {
+                cancelSearch()
+                status.text = "0 resultado(s)"
                 return
             }
-            matches = if (query.isBlank()) emptyList() else searchParagraphs.orEmpty().filter {
-                it.matchBoxes(query).isNotEmpty()
+            status.text = "Pesquisando…"
+            queueSearch(query) { result ->
+                if (input.text.toString().trim() != query) return@queueSearch
+                if (result == null) {
+                    status.text = "Falha na pesquisa"
+                    return@queueSearch
+                }
+                matches = result.pages
+                viewer.setSearchBoxes(result.boxes)
+                status.text = "${matches.size} resultado(s)"
+                if (matches.isNotEmpty()) showMatch(0)
             }
-            pointer = -1
-            viewer.setSearchMatches(matches, query)
-            status.text = "${matches.size} resultado(s)"
-            if (matches.isNotEmpty()) showMatch(0)
         }
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -2090,7 +2109,7 @@ class MainActivity : Activity() {
         form.addView(status)
         form.addView(controls)
         AlertDialog.Builder(this).setTitle("Pesquisar no PDF").setView(form)
-            .setPositiveButton("Fechar", null).show()
+            .setPositiveButton("Fechar", null).setOnDismissListener { cancelSearch() }.show()
     }
 
     private fun choosePdf() {
@@ -2351,9 +2370,7 @@ class MainActivity : Activity() {
             readingStats.markOpened(book.id)
             paragraphs = emptyList()
             ignoredTexts = emptySet()
-            searchParagraphs = null
-            searchLoading = false
-            searchCallbacks.clear()
+            cancelSearch()
             timeline = null
             renderAudioTime()
             playButton.isEnabled = false
@@ -2544,36 +2561,36 @@ class MainActivity : Activity() {
         }.toString())
     }
 
-    private fun requestSearchParagraphs(onReady: () -> Unit) {
-        if (searchParagraphs != null) { onReady(); return }
+    private fun cancelSearch() {
+        searchToken++
+        pendingSearch?.let(searchHandler::removeCallbacks)
+        pendingSearch = null
+    }
+
+    private fun queueSearch(term: String, onReady: (PdfSearchResult?) -> Unit) {
         val book = activeBook ?: return
-        searchCallbacks.add(onReady)
-        if (searchLoading) return
-        searchLoading = true
+        cancelSearch()
+        val token = searchToken
         val loadToken = bookLoadToken
-        io.execute {
-            val loaded = try { loadParagraphsWithGlyphs(book) } catch (_: Exception) { null }
-            runOnUiThread {
-                if (loadToken == bookLoadToken && activeBook?.id == book.id) {
-                    searchLoading = false
-                    val callbacks = searchCallbacks.toList()
-                    searchCallbacks.clear()
-                    if (loaded != null) {
-                        searchParagraphs = loaded
-                        callbacks.forEach { it() }
-                    } else {
-                        Toast.makeText(this, "Não foi possível carregar a pesquisa.", Toast.LENGTH_LONG).show()
+        val task = Runnable {
+            if (!searchWorker.isShutdown) searchWorker.execute {
+                val result = try {
+                    PdfSearch.find(File(book.folder, "paragraphs.json"), term) {
+                        token == searchToken && loadToken == bookLoadToken
+                    }
+                } catch (error: Exception) {
+                    android.util.Log.e("ReverSearch", "Falha ao pesquisar no PDF", error)
+                    null
+                }
+                runOnUiThread {
+                    if (token == searchToken && loadToken == bookLoadToken && activeBook?.id == book.id) {
+                        onReady(result)
                     }
                 }
             }
         }
-    }
-
-    private fun loadParagraphsWithGlyphs(book: Book): List<Paragraph> {
-        val file = File(book.folder, "paragraphs.json")
-        if (!file.isFile) return emptyList()
-        val data = JSONArray(file.readText(Charsets.UTF_8))
-        return (0 until data.length()).map { Paragraph.fromJson(data.getJSONObject(it)) }
+        pendingSearch = task
+        searchHandler.postDelayed(task, 250)
     }
 
     private fun reloadTimelineForVoice() {
@@ -2975,8 +2992,10 @@ class MainActivity : Activity() {
         inForeground = false
         statsHandler.removeCallbacks(readingTick)
         bookLoadToken++
+        cancelSearch()
         viewer.closeDocument()
         io.shutdown()
+        searchWorker.shutdown()
         controllerFuture?.let(MediaController::releaseFuture)
         super.onDestroy()
     }

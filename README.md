@@ -5,6 +5,7 @@ Leitor de PDF com narração local pelo TTS do Android e exportação de áudio 
 Em **Configurações → Relatórios de falha**, é possível salvar ou compartilhar os logs gerados após um fechamento inesperado. O Rever registra exceções Java e consulta os motivos de encerramento preservados pelo Android na próxima abertura. Quando disponível, o rastro de falha nativa acompanha o log em um arquivo `.pb`.
 
 Na 1.1.2, um parágrafo com texto exatamente igual em mais de 15 posições do livro entra na lista interna de ignorados. A reprodução automática, a estimativa de duração e a exportação de áudio pulam essas ocorrências; ainda é possível tocar uma delas e reproduzi-la manualmente. Na horizontal, a visualização centraliza o parágrafo selecionado conforme a narração avança.
+Uma correção da 1.1.2 processa a pesquisa em segundo plano, lendo as posições das letras por parágrafo para evitar carregar de uma vez o índice completo de um livro longo.
 
 ## Dados, backup e estatísticas
 

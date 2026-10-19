@@ -234,9 +234,8 @@ class PdfCanvasView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun setSearchMatches(matches: List<Paragraph>, query: String) {
-        searchBoxes = matches.groupBy { it.page }
-            .mapValues { (_, values) -> values.flatMap { it.matchBoxes(query) } }
+    fun setSearchBoxes(boxes: Map<Int, List<RectF>>) {
+        searchBoxes = boxes
         invalidate()
     }
 
