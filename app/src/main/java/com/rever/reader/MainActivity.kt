@@ -818,6 +818,7 @@ class MainActivity : Activity() {
         }
         renderAudioTime()
         screenMode = "library"
+        CrashReporter.markScreen(this, "library")
         queueStorageSync()
         val screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -997,6 +998,7 @@ class MainActivity : Activity() {
         closePanel()
         if (screenMode == "reader" || screenMode == "library") settingsReturn = screenMode
         screenMode = "settings"
+        CrashReporter.markScreen(this, "settings")
         val screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(14), dp(18), dp(12))
@@ -1483,6 +1485,7 @@ class MainActivity : Activity() {
     private fun leaveSettings() {
         if (settingsReturn == "reader" && activeBook != null) {
             screenMode = "reader"
+            CrashReporter.markScreen(this, "reader", activeBook?.id, currentPage)
             setContentView(root)
             showPageControls()
         } else showLibrary()
@@ -1782,6 +1785,7 @@ class MainActivity : Activity() {
             "about" -> showAbout()
             "reader" -> {
                 screenMode = "reader"
+                CrashReporter.markScreen(this, "reader", activeBook?.id, currentPage)
                 setContentView(root)
             }
             "settings" -> {
@@ -2398,6 +2402,7 @@ class MainActivity : Activity() {
             currentPage = savedPage
             getPreferences(MODE_PRIVATE).edit().putString("last_book_id", book.id).apply()
             screenMode = "reader"
+            CrashReporter.markScreen(this, "reader", book.id, savedPage)
             setContentView(root)
             updatePageLabel()
             showPageControls()
@@ -2572,15 +2577,26 @@ class MainActivity : Activity() {
         cancelSearch()
         val token = searchToken
         val loadToken = bookLoadToken
+        val pageAtStart = currentPage
+        val searchFile = File(book.folder, "paragraphs.json")
         val task = Runnable {
             if (!searchWorker.isShutdown) searchWorker.execute {
+                CrashReporter.markSearch(this, book.id, pageAtStart, term.length,
+                    searchFile.length(), "scanning")
                 val result = try {
-                    PdfSearch.find(File(book.folder, "paragraphs.json"), term) {
+                    PdfSearch.find(searchFile, term) {
                         token == searchToken && loadToken == bookLoadToken
                     }
                 } catch (error: Exception) {
+                    CrashReporter.markSearch(this, book.id, pageAtStart, term.length,
+                        searchFile.length(), "failed")
+                    CrashReporter.recordHandled(this, "pdf_search", error)
                     android.util.Log.e("ReverSearch", "Falha ao pesquisar no PDF", error)
                     null
+                }
+                if (result != null && token == searchToken) {
+                    CrashReporter.markSearch(this, book.id, pageAtStart, term.length,
+                        searchFile.length(), "completed", result.pages.size)
                 }
                 runOnUiThread {
                     if (token == searchToken && loadToken == bookLoadToken && activeBook?.id == book.id) {

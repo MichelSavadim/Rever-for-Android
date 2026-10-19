@@ -6,6 +6,7 @@ Em **Configurações → Relatórios de falha**, é possível salvar ou comparti
 
 Na 1.1.2, um parágrafo com texto exatamente igual em mais de 15 posições do livro entra na lista interna de ignorados. A reprodução automática, a estimativa de duração e a exportação de áudio pulam essas ocorrências; ainda é possível tocar uma delas e reproduzi-la manualmente. Na horizontal, a visualização centraliza o parágrafo selecionado conforme a narração avança.
 Uma correção da 1.1.2 processa a pesquisa em segundo plano, lendo as posições das letras por parágrafo para evitar carregar de uma vez o índice completo de um livro longo.
+Os relatórios em **Configurações → Relatórios de falha** registram a pilha completa das exceções Java, dados de memória e a operação recente. Na pesquisa, registram a etapa, a página e o tamanho do termo, sem salvar o termo pesquisado. Quando o Android disponibiliza um rastro de encerramento, ele é salvo junto do relatório.
 
 ## Dados, backup e estatísticas
 
