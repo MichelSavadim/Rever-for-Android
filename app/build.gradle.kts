@@ -1,5 +1,6 @@
 plugins {
     id("com.android.application")
+    id("com.chaquo.python")
 }
 
 val releaseKeystore = System.getenv("REVER_RELEASE_KEYSTORE")
@@ -12,8 +13,8 @@ android {
         applicationId = "com.rever.reader"
         minSdk = 34
         targetSdk = 34
-        versionCode = 10104
-        versionName = "1.1.2"
+        versionCode = 10105
+        versionName = "1.1.3"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -38,6 +39,16 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.12"
+        pip {
+            install("edge-tts==7.3.1")
+            install("aiohttp==3.10.10")
+        }
     }
 }
 

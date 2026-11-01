@@ -11,3 +11,5 @@ signing/
 *.jks
 *.keystore
 /AGENTS.md
+__pycache__/
+*.pyc

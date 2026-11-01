@@ -20,6 +20,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.Matrix
 import android.graphics.pdf.PdfRenderer
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -182,6 +183,8 @@ class MainActivity : Activity() {
     private var paragraphs: List<Paragraph> = emptyList()
     private var ignoredTexts: Set<String> = emptySet()
     private var selectedParagraph: Paragraph? = null
+    private var voicePreview: MediaPlayer? = null
+    private var voicePreviewFile: File? = null
     private var centerSelectionAfterRotation = false
     private val hidePageControls = Runnable { pageControls.visibility = View.GONE }
     private var searchActive = false
@@ -597,7 +600,7 @@ class MainActivity : Activity() {
             try {
                 val path = NarrationFiles.playable(book.folder, voice, paragraph)
                     ?: NarrationFiles.temporary(book.folder, voice, paragraph).also {
-                        AndroidTts.generate(this, paragraph, it, voice)
+                        NarrationEngine.generate(this, paragraph, it, voice)
                     }
                 runOnUiThread {
                     if (activeBook?.id == bookId) {
@@ -757,11 +760,18 @@ class MainActivity : Activity() {
         content.animate().translationX(0f).setDuration(220).start()
     }
 
-    private fun currentVoice(): String = getPreferences(MODE_PRIVATE)
+    private fun edgeVoiceSelected(): Boolean = getPreferences(MODE_PRIVATE)
+        .getString("tts_engine", "android") == "edge"
+
+    private fun currentVoice(): String = if (edgeVoiceSelected()) EdgeTts.PREFIX +
+        (getPreferences(MODE_PRIVATE).getString("tts_edge_voice", EdgeTts.DEFAULT_VOICE)
+            ?: EdgeTts.DEFAULT_VOICE)
+    else getPreferences(MODE_PRIVATE)
         .getString("tts_voice", AndroidTts.DEFAULT_LANGUAGE) ?: AndroidTts.DEFAULT_LANGUAGE
 
     private fun currentLanguage(): String = getPreferences(MODE_PRIVATE)
-        .getString("tts_language", AndroidTts.DEFAULT_LANGUAGE) ?: AndroidTts.DEFAULT_LANGUAGE
+        .getString(if (edgeVoiceSelected()) "tts_edge_language" else "tts_language",
+            AndroidTts.DEFAULT_LANGUAGE) ?: AndroidTts.DEFAULT_LANGUAGE
 
     private fun darkMode() = getPreferences(MODE_PRIVATE).getBoolean("dark_mode", false)
     private fun surfaceColor() = if (darkMode()) 0xFF202833.toInt() else Color.WHITE
@@ -1074,9 +1084,18 @@ class MainActivity : Activity() {
     private fun showNarrationSettings() {
         screenMode = "narration_settings"
         val screen = subScreen("Narração") { showSettings() }
+        screen.addView(button("Motor: ${if (edgeVoiceSelected()) "Edge TTS (online)" else "Android (offline)"}") {
+            chooseNarrationEngine()
+        })
+        if (edgeVoiceSelected()) screen.addView(TextView(this).apply {
+            text = "Edge TTS requer internet e envia o texto de cada trecho ao serviço de voz. A reprodução dos MP3s já gerados funciona offline."
+            setTextColor(textColor())
+            textSize = 13f
+            setPadding(dp(8), dp(8), dp(8), dp(12))
+        })
         screen.addView(button("Idioma: ${currentLanguage()}") { chooseLanguage() })
-        screen.addView(button("Voz: ${currentVoice()}") { chooseVoice() })
-        screen.addView(button("Instalar mais vozes no Android") {
+        screen.addView(button("Voz: ${currentVoice().removePrefix(EdgeTts.PREFIX)}") { chooseVoice() })
+        if (!edgeVoiceSelected()) screen.addView(button("Instalar mais vozes no Android") {
             try {
                 startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA))
             } catch (_: Exception) {
@@ -1086,6 +1105,20 @@ class MainActivity : Activity() {
             }
         })
         setContentView(screen)
+    }
+
+    private fun chooseNarrationEngine() {
+        val choices = arrayOf("Android · offline", "Edge TTS · requer internet")
+        AlertDialog.Builder(this).setTitle("Motor de narração")
+            .setSingleChoiceItems(choices, if (edgeVoiceSelected()) 1 else 0) { dialog, index ->
+                getPreferences(MODE_PRIVATE).edit()
+                    .putString("tts_engine", if (index == 1) "edge" else "android").apply()
+                mediaController?.pause()
+                mediaController?.clearMediaItems()
+                reloadTimelineForVoice()
+                dialog.dismiss()
+                showNarrationSettings()
+            }.setNegativeButton("Cancelar", null).show()
     }
 
     private fun showStatistics() {
@@ -1874,17 +1907,21 @@ class MainActivity : Activity() {
     private fun chooseLanguage() {
         io.execute {
             try {
-                val voices = AndroidTts.voices(this)
+                val online = edgeVoiceSelected()
+                val voices = if (online) EdgeTts.voices(this) else AndroidTts.voices(this)
                 val languages = voices.map { it.language }.distinct()
                 runOnUiThread {
                     if (languages.isEmpty()) {
-                        reportNarrationError(IllegalStateException("Nenhuma voz offline instalada. Instale uma voz nas configurações de síntese de voz do Android."))
-                    } else AlertDialog.Builder(this).setTitle("Idioma das vozes offline")
+                        reportNarrationError(IllegalStateException(if (online)
+                            "Não foi possível listar as vozes Edge TTS. Verifique a internet."
+                            else "Nenhuma voz offline instalada. Instale uma voz nas configurações de síntese de voz do Android."))
+                    } else AlertDialog.Builder(this).setTitle(if (online) "Idioma das vozes Edge TTS" else "Idioma das vozes offline")
                         .setItems(languages.toTypedArray()) { _, choice ->
                             val language = languages[choice]
                             val voice = voices.first { it.language == language }
                             getPreferences(MODE_PRIVATE).edit()
-                                .putString("tts_language", language).putString("tts_voice", voice.id).apply()
+                                .putString(if (online) "tts_edge_language" else "tts_language", language)
+                                .putString(if (online) "tts_edge_voice" else "tts_voice", voice.id).apply()
                             mediaController?.pause()
                             mediaController?.clearMediaItems()
                             reloadTimelineForVoice()
@@ -1898,12 +1935,18 @@ class MainActivity : Activity() {
     private fun chooseVoice() {
         io.execute {
             try {
-                val choices = AndroidTts.voices(this).filter { it.language == currentLanguage() }
+                val online = edgeVoiceSelected()
+                val choices = (if (online) EdgeTts.voices(this) else AndroidTts.voices(this))
+                    .filter { it.language == currentLanguage() }
                 runOnUiThread {
                     if (choices.isEmpty()) {
-                        reportNarrationError(IllegalStateException("Não há vozes offline para ${currentLanguage()} instaladas no Android."))
+                        reportNarrationError(IllegalStateException(if (online)
+                            "Não há vozes Edge TTS para ${currentLanguage()}. Verifique a internet."
+                            else "Não há vozes offline para ${currentLanguage()} instaladas no Android."))
                     } else {
-                        var selected = choices.indexOfFirst { it.id == currentVoice() }.coerceAtLeast(0)
+                        var selected = choices.indexOfFirst {
+                            it.id == currentVoice().removePrefix(EdgeTts.PREFIX)
+                        }.coerceAtLeast(0)
                         val dialog = AlertDialog.Builder(this).setTitle("Voz da narração")
                             .setSingleChoiceItems(choices.map { it.label }.toTypedArray(), selected) { _, which ->
                                 selected = which
@@ -1916,13 +1959,17 @@ class MainActivity : Activity() {
                             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                                 val voiceId = choices[selected].id
                                 io.execute {
-                                    try { AndroidTts.preview(this, voiceId) }
+                                    try {
+                                        if (online) previewEdgeVoice(voiceId)
+                                        else AndroidTts.preview(this, voiceId)
+                                    }
                                     catch (error: Exception) { runOnUiThread { reportNarrationError(error) } }
                                 }
                             }
                             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                                 getPreferences(MODE_PRIVATE).edit()
-                                    .putString("tts_voice", choices[selected].id).apply()
+                                    .putString(if (online) "tts_edge_voice" else "tts_voice",
+                                        choices[selected].id).apply()
                                 mediaController?.pause()
                                 mediaController?.clearMediaItems()
                                 reloadTimelineForVoice()
@@ -1934,6 +1981,41 @@ class MainActivity : Activity() {
                     }
                 }
             } catch (error: Exception) { runOnUiThread { reportNarrationError(error) } }
+        }
+    }
+
+    private fun clearVoicePreview() {
+        voicePreview?.release()
+        voicePreview = null
+        voicePreviewFile?.delete()
+        voicePreviewFile = null
+    }
+
+    private fun previewEdgeVoice(voiceId: String) {
+        val file = File(cacheDir, "edge-voice-preview-${System.nanoTime()}.mp3")
+        val sample = Paragraph(0, 0, "Olá! Esta é uma amostra da voz para a leitura dos seus PDFs.", RectF())
+        try {
+            EdgeTts.generate(this, sample, file, EdgeTts.PREFIX + voiceId)
+            runOnUiThread {
+                try {
+                    clearVoicePreview()
+                    val player = MediaPlayer().apply {
+                        setDataSource(file.absolutePath)
+                        setOnCompletionListener { clearVoicePreview() }
+                        setOnErrorListener { _, _, _ -> clearVoicePreview(); true }
+                        prepare()
+                    }
+                    voicePreview = player
+                    voicePreviewFile = file
+                    player.start()
+                } catch (error: Exception) {
+                    file.delete()
+                    reportNarrationError(error)
+                }
+            }
+        } catch (error: Exception) {
+            file.delete()
+            throw error
         }
     }
 
@@ -2754,7 +2836,7 @@ class MainActivity : Activity() {
                                 check(partial.renameTo(target)) { "Não foi possível guardar um trecho MP3." }
                             } finally { partial.delete() }
                         } else {
-                            AndroidTts.generate(this, paragraph, target, voice)
+                            NarrationEngine.generate(this, paragraph, target, voice)
                         }
                         created.add(target)
                     }
@@ -2796,7 +2878,7 @@ class MainActivity : Activity() {
     private fun reportNarrationError(error: Exception) {
         val detail = error.message.orEmpty()
         AlertDialog.Builder(this).setTitle("Falha na narração")
-            .setMessage(detail.ifBlank { "O mecanismo de voz do Android não conseguiu gerar o áudio." })
+            .setMessage(detail.ifBlank { "Não foi possível gerar o áudio." })
             .setPositiveButton("Entendi", null).show()
     }
 
@@ -3006,6 +3088,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         inForeground = false
+        clearVoicePreview()
         statsHandler.removeCallbacks(readingTick)
         bookLoadToken++
         cancelSearch()

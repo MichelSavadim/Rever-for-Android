@@ -171,7 +171,7 @@ class PlaybackService : MediaSessionService() {
                 path = NarrationFiles.playable(folder, activeVoice, paragraph)
                 if (path == null) {
                     path = NarrationFiles.temporary(folder, activeVoice, paragraph)
-                    AndroidTts.generate(this, paragraph, path, activeVoice)
+                    NarrationEngine.generate(this, paragraph, path, activeVoice)
                     main.removeCallbacks(syncStorage)
                     main.postDelayed(syncStorage, 5_000)
                 }
