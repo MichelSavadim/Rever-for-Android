@@ -1,3 +1,7 @@
+Rever para Android 1.1.4
+
+• Ajustes internos para sincronização privada entre dispositivos.
+
 Rever para Android 1.1.3
 
 • Edge TTS voltou como opção de narração online, com seleção de idioma, voz e amostra.

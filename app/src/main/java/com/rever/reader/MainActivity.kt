@@ -39,6 +39,7 @@ import android.text.TextUtils
 import android.util.JsonReader
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
@@ -96,6 +97,24 @@ class MainActivity : Activity() {
     private val createBackupRequest = 1104
     private val restoreBackupRequest = 1105
     private val io = Executors.newSingleThreadExecutor()
+    private val developerHandler = Handler(Looper.getMainLooper())
+    private var developerUnlocked = false
+    private val reverSyncHandler = Handler(Looper.getMainLooper())
+    private val reverSyncRunning = AtomicBoolean(false)
+    private val scheduledReverSync = Runnable { syncWithPc(false) }
+    private val reverSyncPoll = object : Runnable {
+        override fun run() {
+            if (inForeground) {
+                syncWithPc(false)
+                reverSyncHandler.postDelayed(this, 60_000)
+            }
+        }
+    }
+    private fun queueReverSync() {
+        if (!getPreferences(MODE_PRIVATE).getBoolean("rever_sync_enabled", false)) return
+        reverSyncHandler.removeCallbacks(scheduledReverSync)
+        reverSyncHandler.postDelayed(scheduledReverSync, 3_000)
+    }
     private val searchWorker = Executors.newSingleThreadExecutor()
     private val searchHandler = Handler(Looper.getMainLooper())
     @Volatile private var searchToken = 0
@@ -177,6 +196,7 @@ class MainActivity : Activity() {
     private var playbackSpeed = 1f
     private var audioParagraphIndex = -1
     private var activeBook: Book? = null
+    private var activeStateTimestamp = 0L
     private var timeline: DurationTimeline? = null
     private var bookLoadToken = 0
     private var restoringReaderPage = false
@@ -1049,6 +1069,9 @@ class MainActivity : Activity() {
         })
         screen.addView(button("Mensagens") { showMessages() })
         screen.addView(button("Relatórios de falha") { showCrashReports() })
+        if (getPreferences(MODE_PRIVATE).getBoolean("developer_options", false)) {
+            screen.addView(button("Opções de desenvolvedor") { showDeveloperOptions() })
+        }
         screen.addView(button("Sobre") { showAbout() })
         setContentView(screen)
     }
@@ -1594,7 +1617,36 @@ class MainActivity : Activity() {
         screen.addView(button("Ir para repositório") {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateManager.repositoryUrl)))
         })
-        screen.addView(button("Sobre o Rever") { showReadme() })
+        val aboutRever = button("Sobre o Rever") {
+            if (!developerUnlocked) showReadme()
+            developerUnlocked = false
+        }
+        val unlockDeveloper = Runnable {
+            if (!getPreferences(MODE_PRIVATE).getBoolean("developer_options", false)) {
+                getPreferences(MODE_PRIVATE).edit().putBoolean("developer_options", true).apply()
+                Toast.makeText(this, "Opções de desenvolvedor habilitadas em Configurações.",
+                    Toast.LENGTH_LONG).show()
+            }
+            developerUnlocked = true
+        }
+        aboutRever.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    developerUnlocked = false
+                    developerHandler.postDelayed(unlockDeveloper, 15_000)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val limit = ViewConfiguration.get(this).scaledTouchSlop
+                    if (event.x < -limit || event.y < -limit ||
+                        event.x > view.width + limit || event.y > view.height + limit)
+                        developerHandler.removeCallbacks(unlockDeveloper)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    developerHandler.removeCallbacks(unlockDeveloper)
+            }
+            false
+        }
+        screen.addView(aboutRever)
         setContentView(screen)
         io.execute {
             val release = try { updateManager.current(version) } catch (_: Exception) { null }
@@ -1620,6 +1672,82 @@ class MainActivity : Activity() {
                     setPadding(dp(18), dp(12), dp(18), dp(12))
                 })
             }).setPositiveButton("Fechar", null).show()
+    }
+
+    private fun showDeveloperOptions() {
+        screenMode = "developer_options"
+        val screen = subScreen("Opções de desenvolvedor") { showSettings() }
+        screen.addView(TextView(this).apply {
+            text = "Sincronização privada com o Rever do PC via Tailscale Serve. O PC precisa estar ligado e com o serviço ativo."
+            setTextColor(textColor())
+            setPadding(0, dp(10), 0, dp(12))
+        })
+        val prefs = getPreferences(MODE_PRIVATE)
+        val endpoint = EditText(this).apply {
+            hint = "https://seu-pc.sua-tailnet.ts.net"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(prefs.getString("rever_sync_endpoint", ""))
+        }
+        val token = EditText(this).apply {
+            hint = "Token exibido no PC"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(prefs.getString("rever_sync_token", ""))
+        }
+        screen.addView(endpoint)
+        screen.addView(token)
+        fun save() {
+            prefs.edit().putString("rever_sync_endpoint", endpoint.text.toString().trim())
+                .putString("rever_sync_token", token.text.toString().trim()).apply()
+        }
+        screen.addView(button("Salvar conexão") {
+            save()
+            Toast.makeText(this, "Conexão salva.", Toast.LENGTH_SHORT).show()
+        })
+        screen.addView(button(if (prefs.getBoolean("rever_sync_enabled", false))
+            "Sincronização automática: ligada" else "Sincronização automática: desligada") {
+            save()
+            val enabled = !prefs.getBoolean("rever_sync_enabled", false)
+            prefs.edit().putBoolean("rever_sync_enabled", enabled).apply()
+            if (enabled) queueReverSync()
+            showDeveloperOptions()
+        })
+        screen.addView(button("Sincronizar agora") {
+            save()
+            syncWithPc(true)
+        })
+        setContentView(screen)
+    }
+
+    private fun syncWithPc(manual: Boolean) {
+        if (!reverSyncRunning.compareAndSet(false, true)) return
+        val prefs = getPreferences(MODE_PRIVATE)
+        val endpoint = prefs.getString("rever_sync_endpoint", "").orEmpty()
+        val token = prefs.getString("rever_sync_token", "").orEmpty()
+        if (manual) Toast.makeText(this, "Sincronizando com o PC…", Toast.LENGTH_SHORT).show()
+        io.execute {
+            try {
+                val result = ReverSync(endpoint, token).run(library) { uri, name ->
+                    importBook(uri, name, null)
+                }
+                runOnUiThread {
+                    if (result.downloaded > 0 && screenMode == "library") showLibrary()
+                    val openBook = activeBook
+                    if (screenMode == "reader" && openBook != null &&
+                        openBook.id in result.updatedLocally && mediaController?.isPlaying != true) {
+                        showBook(openBook)
+                    }
+                    if (manual) Toast.makeText(this,
+                        "Sincronizado: ${result.downloaded} recebido(s), ${result.uploaded} enviado(s), ${result.states} posição(ões).",
+                        Toast.LENGTH_LONG).show()
+                }
+            } catch (error: Exception) {
+                android.util.Log.w("ReverSync", "Sincronização indisponível", error)
+                if (manual) runOnUiThread { Toast.makeText(this,
+                    "Falha na sincronização: ${error.message}", Toast.LENGTH_LONG).show() }
+            } finally { reverSyncRunning.set(false) }
+        }
     }
 
     private fun installedVersion(): String =
@@ -2439,6 +2567,7 @@ class MainActivity : Activity() {
             val rebuildParagraphs = metadata.optInt("paragraph_version", 0) < ParagraphExtractor.VERSION
             val state = File(book.folder, "reader_state.json")
             val savedState = if (state.isFile) JSONObject(state.readText(Charsets.UTF_8)) else JSONObject()
+            activeStateTimestamp = savedState.optLong("updated_at", if (state.isFile) state.lastModified() else 0L)
             val savedPage = savedState.optInt("page", 1).coerceIn(1, book.pageCount)
             val savedParagraph = if (rebuildParagraphs) null else savedState.optJSONObject("paragraph")
             val loadToken = ++bookLoadToken
@@ -2520,9 +2649,13 @@ class MainActivity : Activity() {
                             paragraphs = loaded
                             ignoredTexts = ignored
                             selectedParagraph = savedParagraph?.let { reference ->
-                                loaded.firstOrNull {
-                                    it.page == reference.optInt("page") && it.index == reference.optInt("index")
-                                }
+                                val anchor = reference.optString("text").replace(Regex("\\s+"), " ")
+                                    .trim().lowercase()
+                                loaded.firstOrNull { it.page == reference.optInt("page") &&
+                                    anchor.isNotEmpty() && it.text.replace(Regex("\\s+"), " ")
+                                        .trim().lowercase().startsWith(anchor) }
+                                    ?: loaded.firstOrNull { it.page == reference.optInt("page") &&
+                                        it.index == reference.optInt("index") }
                             }
                             refreshHighlight()
                             if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
@@ -2562,13 +2695,23 @@ class MainActivity : Activity() {
 
     private fun saveReaderState() {
         val book = activeBook ?: return
+        val stateFile = File(book.folder, "reader_state.json")
+        if (stateFile.isFile) {
+            val onDisk = try { JSONObject(stateFile.readText()).optLong("updated_at", stateFile.lastModified()) }
+                catch (_: Exception) { 0L }
+            if (onDisk > activeStateTimestamp) return
+        }
         val selected = selectedParagraph
         val paragraphJson = if (selected == null) JSONObject.NULL else JSONObject()
             .put("page", selected.page).put("index", selected.index)
+            .put("text", selected.text.take(512))
             .put("bbox", JSONArray().put(selected.box.left).put(selected.box.top)
                 .put(selected.box.right).put(selected.box.bottom))
-        writeTextAtomic(File(book.folder, "reader_state.json"),
-            JSONObject().put("page", currentPage).put("paragraph", paragraphJson).toString())
+        activeStateTimestamp = maxOf(System.currentTimeMillis(), activeStateTimestamp + 1)
+        writeTextAtomic(stateFile,
+            JSONObject().put("page", currentPage).put("paragraph", paragraphJson)
+                .put("updated_at", activeStateTimestamp).toString())
+        queueReverSync()
     }
 
     private fun writeTextAtomic(file: File, text: String) {
@@ -2578,6 +2721,7 @@ class MainActivity : Activity() {
             partial.writeText(text, Charsets.UTF_8)
             check(partial.renameTo(file)) { "Não foi possível salvar ${file.name}." }
             queueStorageSync()
+            if (file.name == "book.json") queueReverSync()
         } finally {
             partial.delete()
         }
@@ -3010,7 +3154,7 @@ class MainActivity : Activity() {
             }
             screenMode == "categories" -> leaveCategories()
             screenMode == "narration_settings" || screenMode == "data_settings" ||
-                screenMode == "statistics" -> showSettings()
+            screenMode == "statistics" || screenMode == "developer_options" -> showSettings()
             screenMode == "settings" -> leaveSettings()
             screenMode == "reader" -> showLibrary()
             screenMode == "library" && librarySelections.isNotEmpty() -> {
@@ -3037,6 +3181,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        reverSyncHandler.removeCallbacks(reverSyncPoll)
         inForeground = false
         readingTickAt = 0L
         flushReadingTime()
@@ -3046,6 +3191,9 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        queueReverSync()
+        reverSyncHandler.removeCallbacks(reverSyncPoll)
+        reverSyncHandler.postDelayed(reverSyncPoll, 60_000)
         inForeground = true
         statsHandler.removeCallbacks(readingTick)
         statsHandler.post(readingTick)

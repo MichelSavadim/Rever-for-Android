@@ -1,6 +1,6 @@
 # Rever para Android
 
-Leitor de PDF com narração pelo TTS local do Android ou pelo Edge TTS online, e exportação de áudio em MP3. A versão 1.1.3 foi preparada para Android 14. A biblioteca, os parágrafos, o ponto de leitura, as categorias e os áudios ficam no armazenamento interno do aplicativo ou na pasta escolhida em **Dados e Armazenamento**. O Android exige uma cópia de trabalho interna para abrir PDFs e gerar áudio quando uma pasta externa é escolhida.
+Leitor de PDF com narração pelo TTS local do Android ou pelo Edge TTS online, e exportação de áudio em MP3. A versão 1.1.4 foi preparada para Android 14. A biblioteca, os parágrafos, o ponto de leitura, as categorias e os áudios ficam no armazenamento interno do aplicativo ou na pasta escolhida em **Dados e Armazenamento**. O Android exige uma cópia de trabalho interna para abrir PDFs e gerar áudio quando uma pasta externa é escolhida. Opções de desenvolvedor foram adicionadas para recursos pessoais de sincronização.
 
 Em **Configurações → Narração → Motor**, escolha Android para gerar voz offline ou Edge TTS para usar vozes online. Edge TTS precisa de internet e envia o texto de cada trecho ao serviço de voz; a reprodução dos MP3s já gerados funciona offline. Cada motor mantém sua escolha de idioma e voz. O app inclui `edge-tts` 7.3.1 e usa o serviço de leitura em voz alta do Microsoft Edge, que pode mudar ou ficar indisponível sem aviso.
 
