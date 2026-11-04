@@ -97,23 +97,34 @@ class MainActivity : Activity() {
     private val createBackupRequest = 1104
     private val restoreBackupRequest = 1105
     private val io = Executors.newSingleThreadExecutor()
+    private val reverSyncIo = Executors.newSingleThreadExecutor()
     private val developerHandler = Handler(Looper.getMainLooper())
     private var developerUnlocked = false
     private val reverSyncHandler = Handler(Looper.getMainLooper())
     private val reverSyncRunning = AtomicBoolean(false)
-    private val scheduledReverSync = Runnable { syncWithPc(false) }
+    @Volatile private var pendingReverPublish = false
+    @Volatile private var pendingPlayingBookId: String? = null
+    @Volatile private var reverStateGeneration = 0L
+    private val scheduledReverSync = Runnable {
+        val publish = pendingReverPublish
+        pendingReverPublish = false
+        syncWithPc(false, publish)
+    }
     private val reverSyncPoll = object : Runnable {
         override fun run() {
-            if (inForeground) {
-                syncWithPc(false)
+            if ((inForeground || mediaController?.isPlaying == true) &&
+                getPreferences(MODE_PRIVATE).getBoolean("rever_sync_enabled", false)) {
+                syncWithPc(false, false)
                 reverSyncHandler.postDelayed(this, 60_000)
             }
         }
     }
-    private fun queueReverSync() {
+    private fun queueReverSync(publish: Boolean = false, immediate: Boolean = false,
+                               delayMs: Long = 3_000) {
         if (!getPreferences(MODE_PRIVATE).getBoolean("rever_sync_enabled", false)) return
+        if (publish) pendingReverPublish = true
         reverSyncHandler.removeCallbacks(scheduledReverSync)
-        reverSyncHandler.postDelayed(scheduledReverSync, 3_000)
+        reverSyncHandler.postDelayed(scheduledReverSync, if (immediate) 0 else delayMs)
     }
     private val searchWorker = Executors.newSingleThreadExecutor()
     private val searchHandler = Handler(Looper.getMainLooper())
@@ -228,7 +239,6 @@ class MainActivity : Activity() {
                 updatePageLabel()
                 if (!restoringReaderPage) {
                     activeBook?.let { readingStats.markPage(it.id, number, it.pageCount) }
-                    saveReaderState()
                 }
             }
             onViewportMoved = { showPageControls() }
@@ -525,6 +535,9 @@ class MainActivity : Activity() {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         playButton.text = if (isPlaying) "❚❚" else "▶"
                         refreshHighlight()
+                        queueReverSync(immediate = true)
+                        reverSyncHandler.removeCallbacks(reverSyncPoll)
+                        if (inForeground || isPlaying) reverSyncHandler.postDelayed(reverSyncPoll, 60_000)
                     }
 
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -534,7 +547,7 @@ class MainActivity : Activity() {
                             selectedParagraph = paragraphs[index]
                             refreshHighlight()
                             followParagraph(paragraphs[index])
-                            saveReaderState()
+                            saveReaderState(playing = true)
                         }
                     }
                 })
@@ -647,7 +660,7 @@ class MainActivity : Activity() {
                         audioParagraphIndex = index
                         refreshHighlight()
                         followParagraph(paragraph)
-                        saveReaderState()
+                        saveReaderState(playing = true)
                     }
                     playButton.isEnabled = true
                     playButton.text = "❚❚"
@@ -826,7 +839,6 @@ class MainActivity : Activity() {
             librarySelections.clear()
         }
         if (activeBook != null) {
-            saveReaderState()
             timeline?.let { current ->
                 val snapshot = current.snapshot()
                 if (!io.isShutdown) io.execute { writeTextAtomic(current.file, snapshot) }
@@ -1710,33 +1722,52 @@ class MainActivity : Activity() {
             save()
             val enabled = !prefs.getBoolean("rever_sync_enabled", false)
             prefs.edit().putBoolean("rever_sync_enabled", enabled).apply()
-            if (enabled) queueReverSync()
+            if (enabled) {
+                queueReverSync(immediate = true)
+                reverSyncHandler.removeCallbacks(reverSyncPoll)
+                reverSyncHandler.postDelayed(reverSyncPoll, 60_000)
+            } else {
+                reverSyncHandler.removeCallbacks(scheduledReverSync)
+                reverSyncHandler.removeCallbacks(reverSyncPoll)
+                pendingReverPublish = false
+            }
             showDeveloperOptions()
         })
         screen.addView(button("Sincronizar agora") {
             save()
-            syncWithPc(true)
+            syncWithPc(true, true)
         })
         setContentView(screen)
     }
 
-    private fun syncWithPc(manual: Boolean) {
-        if (!reverSyncRunning.compareAndSet(false, true)) return
+    private fun syncWithPc(manual: Boolean, publish: Boolean) {
+        if (!reverSyncRunning.compareAndSet(false, true)) {
+            if (publish) pendingReverPublish = true
+            return
+        }
         val prefs = getPreferences(MODE_PRIVATE)
         val endpoint = prefs.getString("rever_sync_endpoint", "").orEmpty()
         val token = prefs.getString("rever_sync_token", "").orEmpty()
+        val playingBookId = activeBook?.id?.takeIf { mediaController?.isPlaying == true }
+            ?: if (publish) pendingPlayingBookId else null
+        val publishGeneration = reverStateGeneration
         if (manual) Toast.makeText(this, "Sincronizando com o PC…", Toast.LENGTH_SHORT).show()
-        io.execute {
+        reverSyncIo.execute {
+            var succeeded = false
             try {
-                val result = ReverSync(endpoint, token).run(library) { uri, name ->
-                    importBook(uri, name, null)
-                }
+                val result = ReverSync(endpoint, token).run(library,
+                    { uri, name -> importBook(uri, name, null) }, publish, playingBookId)
+                succeeded = true
+                if (publish && publishGeneration == reverStateGeneration)
+                    pendingPlayingBookId = null
                 runOnUiThread {
-                    if (result.downloaded > 0 && screenMode == "library") showLibrary()
+                    if (activeBook?.id in result.deletedLocally) showLibrary()
+                    else if ((result.downloaded > 0 || result.deletedLocally.isNotEmpty()) &&
+                        screenMode == "library") showLibrary()
                     val openBook = activeBook
                     if (screenMode == "reader" && openBook != null &&
                         openBook.id in result.updatedLocally && mediaController?.isPlaying != true) {
-                        showBook(openBook)
+                        showBook(openBook, syncOnOpen = false)
                     }
                     if (manual) Toast.makeText(this,
                         "Sincronizado: ${result.downloaded} recebido(s), ${result.uploaded} enviado(s), ${result.states} posição(ões).",
@@ -1746,7 +1777,12 @@ class MainActivity : Activity() {
                 android.util.Log.w("ReverSync", "Sincronização indisponível", error)
                 if (manual) runOnUiThread { Toast.makeText(this,
                     "Falha na sincronização: ${error.message}", Toast.LENGTH_LONG).show() }
-            } finally { reverSyncRunning.set(false) }
+            } finally {
+                reverSyncRunning.set(false)
+                if (pendingReverPublish || publish && !succeeded) runOnUiThread {
+                    queueReverSync(publish = true, immediate = succeeded, delayMs = 60_000)
+                }
+            }
         }
     }
 
@@ -2340,7 +2376,6 @@ class MainActivity : Activity() {
         if (resultCode == RESULT_OK && requestCode == chooseStorageRequest) {
             val uri = data?.data ?: return
             mediaController?.pause()
-            saveReaderState()
             Toast.makeText(this, "Transferindo dados para a pasta selecionada…", Toast.LENGTH_LONG).show()
             io.execute {
                 try {
@@ -2356,7 +2391,6 @@ class MainActivity : Activity() {
         }
         if (resultCode == RESULT_OK && requestCode == createBackupRequest) {
             val uri = data?.data ?: return
-            saveReaderState()
             Toast.makeText(this, "Criando backup…", Toast.LENGTH_SHORT).show()
             io.execute {
                 try {
@@ -2425,6 +2459,8 @@ class MainActivity : Activity() {
         io.execute {
             try {
                 val book = importBook(uri, name, categoryId)
+                ReverSync.clearDeletion(library, book.id)
+                queueReverSync(publish = true, immediate = true)
                 runOnUiThread { showBook(book) }
             } catch (error: Exception) {
                 runOnUiThread {
@@ -2558,7 +2594,7 @@ class MainActivity : Activity() {
         if (primary != 0) primary else compareNaturalTitles(a.title, b.title)
     }
 
-    private fun showBook(book: Book) {
+    private fun showBook(book: Book, syncOnOpen: Boolean = true) {
         flushReadingTime()
         try {
             val metadata = JSONObject(File(book.folder, "book.json").readText(Charsets.UTF_8))
@@ -2615,6 +2651,7 @@ class MainActivity : Activity() {
             screenMode = "reader"
             CrashReporter.markScreen(this, "reader", book.id, savedPage)
             setContentView(root)
+            if (syncOnOpen) queueReverSync(immediate = true)
             updatePageLabel()
             showPageControls()
             root.post {
@@ -2628,7 +2665,6 @@ class MainActivity : Activity() {
                     restoringReaderPage = false
                     readingStats.markPage(book.id, currentPage, book.pageCount)
                     updatePageLabel()
-                    if (rebuildParagraphs || paragraphs.isNotEmpty()) saveReaderState()
                 }
             }
             if (rebuildParagraphs) {
@@ -2666,7 +2702,6 @@ class MainActivity : Activity() {
                             }
                             playButton.isEnabled = loaded.isNotEmpty()
                             playButton.text = if (mediaController?.isPlaying == true) "❚❚" else "▶"
-                            if (!restoringReaderPage) saveReaderState()
                         }
                     }
                     val timelineVoice = currentVoice()
@@ -2693,25 +2728,28 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun saveReaderState() {
+    private fun saveReaderState(playing: Boolean = false) {
         val book = activeBook ?: return
         val stateFile = File(book.folder, "reader_state.json")
-        if (stateFile.isFile) {
-            val onDisk = try { JSONObject(stateFile.readText()).optLong("updated_at", stateFile.lastModified()) }
-                catch (_: Exception) { 0L }
-            if (onDisk > activeStateTimestamp) return
-        }
         val selected = selectedParagraph
+        val oldState = try { JSONObject(stateFile.readText()) } catch (_: Exception) { JSONObject() }
+        val oldParagraph = oldState.optJSONObject("paragraph")
+        if (oldState.has("paragraph") && oldParagraph?.optInt("page") == selected?.page &&
+            oldParagraph?.optInt("index") == selected?.index &&
+            (oldParagraph != null) == (selected != null)) return
         val paragraphJson = if (selected == null) JSONObject.NULL else JSONObject()
             .put("page", selected.page).put("index", selected.index)
             .put("text", selected.text.take(512))
             .put("bbox", JSONArray().put(selected.box.left).put(selected.box.top)
                 .put(selected.box.right).put(selected.box.bottom))
-        activeStateTimestamp = maxOf(System.currentTimeMillis(), activeStateTimestamp + 1)
+        activeStateTimestamp = maxOf(System.currentTimeMillis(), activeStateTimestamp + 1,
+            oldState.optLong("updated_at") + 1)
         writeTextAtomic(stateFile,
             JSONObject().put("page", currentPage).put("paragraph", paragraphJson)
                 .put("updated_at", activeStateTimestamp).toString())
-        queueReverSync()
+        reverStateGeneration++
+        if (playing) pendingPlayingBookId = book.id
+        queueReverSync(publish = true, immediate = true)
     }
 
     private fun writeTextAtomic(file: File, text: String) {
@@ -2721,7 +2759,6 @@ class MainActivity : Activity() {
             partial.writeText(text, Charsets.UTF_8)
             check(partial.renameTo(file)) { "Não foi possível salvar ${file.name}." }
             queueStorageSync()
-            if (file.name == "book.json") queueReverSync()
         } finally {
             partial.delete()
         }
@@ -3089,6 +3126,8 @@ class MainActivity : Activity() {
                     io.execute {
                         val deleted = book.folder.deleteRecursively()
                         if (deleted) {
+                            ReverSync.recordDeletion(library, book.id)
+                            queueReverSync(publish = true, immediate = true)
                             readingStats.removeBook(book.id)
                             queueStorageSync()
                         }
@@ -3181,7 +3220,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        reverSyncHandler.removeCallbacks(reverSyncPoll)
+        if (mediaController?.isPlaying != true) reverSyncHandler.removeCallbacks(reverSyncPoll)
         inForeground = false
         readingTickAt = 0L
         flushReadingTime()
@@ -3191,9 +3230,10 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        queueReverSync()
+        queueReverSync(immediate = true)
         reverSyncHandler.removeCallbacks(reverSyncPoll)
-        reverSyncHandler.postDelayed(reverSyncPoll, 60_000)
+        if (getPreferences(MODE_PRIVATE).getBoolean("rever_sync_enabled", false))
+            reverSyncHandler.postDelayed(reverSyncPoll, 60_000)
         inForeground = true
         statsHandler.removeCallbacks(readingTick)
         statsHandler.post(readingTick)
@@ -3242,6 +3282,7 @@ class MainActivity : Activity() {
         cancelSearch()
         viewer.closeDocument()
         io.shutdown()
+        reverSyncIo.shutdown()
         searchWorker.shutdown()
         controllerFuture?.let(MediaController::releaseFuture)
         super.onDestroy()
