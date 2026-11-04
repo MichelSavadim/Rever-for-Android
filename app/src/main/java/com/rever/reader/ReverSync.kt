@@ -118,6 +118,8 @@ class ReverSync(private val endpoint: String, private val token: String) {
         val deletedFile = File(library, DELETED_FILE)
         val localDeleted = try { JSONObject(deletedFile.readText()) } catch (_: Exception) { JSONObject() }
         val remoteDeleted = manifest.optJSONObject("deleted") ?: JSONObject()
+        val hidden = manifest.optJSONArray("hidden")
+        val hiddenIds = (0 until (hidden?.length() ?: 0)).map { hidden!!.getString(it) }.toSet()
         val deletedLocally = mutableSetOf<String>()
         val deferredDeletions = mutableSetOf<String>()
         if (publish) for (id in localDeleted.keys().asSequence().toList()) {
@@ -191,6 +193,7 @@ class ReverSync(private val endpoint: String, private val token: String) {
             if (!pdf.isFile) continue
             val id = folder.name
             if (id in deferredDeletions) continue
+            if (id in hiddenIds) continue
             if (publish && !remote.containsKey(id)) {
                 val title = try { JSONObject(File(folder, "book.json").readText()).optString("title", "PDF") }
                     catch (_: Exception) { "PDF" }
