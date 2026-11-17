@@ -20,6 +20,7 @@ class PlaybackService : MediaSessionService() {
     companion object {
         const val ACTION_CONFIGURE = "com.rever.reader.CONFIGURE_NARRATION"
         const val ACTION_CLEAR = "com.rever.reader.CLEAR_NARRATION"
+        const val ACTION_REFRESH_EXCEPTIONS = "com.rever.reader.REFRESH_EXCEPTIONS"
         const val EXTRA_BOOK_ID = "book_id"
         const val EXTRA_VOICE = "voice"
     }
@@ -39,6 +40,7 @@ class PlaybackService : MediaSessionService() {
     private var bookFolder: File? = null
     private var paragraphs: List<Paragraph> = emptyList()
     private var ignoredTexts: Set<String> = emptySet()
+    private var audioExceptions: AudioExceptions? = null
     private var voice = AndroidTts.DEFAULT_LANGUAGE
     private var preparing = -1
     private var token = 0
@@ -84,7 +86,7 @@ class PlaybackService : MediaSessionService() {
                 if (playbackState == Player.STATE_ENDED) {
                     player.currentMediaItem?.mediaId?.toIntOrNull()?.let { current ->
                         if ((current + 1 until paragraphs.size).none {
-                            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+                            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts, audioExceptions)
                         }) bookFolder?.name?.let(readingStats::markCompleted)
                         prepareNext(current)
                     }
@@ -96,6 +98,17 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REFRESH_EXCEPTIONS) {
+            bookFolder?.let { folder ->
+                audioExceptions = AudioExceptions(folder)
+                token++
+                preparing = -1
+                val current = player.currentMediaItem?.mediaId?.toIntOrNull()
+                if (player.mediaItemCount > player.currentMediaItemIndex + 1)
+                    player.removeMediaItems(player.currentMediaItemIndex + 1, player.mediaItemCount)
+                if (current != null) prepareNext(current)
+            }
+        }
         if (intent?.action == ACTION_CLEAR) {
             flushNarrationTime()
             token++
@@ -103,6 +116,7 @@ class PlaybackService : MediaSessionService() {
             bookFolder = null
             paragraphs = emptyList()
             ignoredTexts = emptySet()
+            audioExceptions = null
             preparing = -1
             player.pause()
             player.clearMediaItems()
@@ -124,6 +138,7 @@ class PlaybackService : MediaSessionService() {
                     if (old != null && old != folder) worker.execute { clearTemporary(old) }
                     paragraphs = emptyList()
                     ignoredTexts = emptySet()
+                    audioExceptions = AudioExceptions(folder)
                     val configuredToken = token
                     indexWorker.execute {
                         val loaded = try { NarrationFiles.paragraphs(folder) }
@@ -140,6 +155,7 @@ class PlaybackService : MediaSessionService() {
                             if (configuredToken == token && bookFolder == folder) {
                                 paragraphs = loaded
                                 ignoredTexts = ignored
+                                audioExceptions = AudioExceptions(folder)
                                 player.currentMediaItem?.mediaId?.toIntOrNull()?.let(::prepareNext)
                             }
                         }
@@ -157,7 +173,7 @@ class PlaybackService : MediaSessionService() {
         val folder = bookFolder ?: return
         if (preparing >= 0 || player.mediaItemCount > player.currentMediaItemIndex + 1) return
         val next = ((current + 1) until paragraphs.size).firstOrNull {
-            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts, audioExceptions)
         } ?: return
         preparing = next
         val activeToken = token

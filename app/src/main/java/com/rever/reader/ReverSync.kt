@@ -2,14 +2,17 @@ package com.rever.reader
 
 import android.net.Uri
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
 
-/** Exchanges only PDFs and reading positions; derived data stays on each device. */
+/** Exchanges the data types enabled on both devices. */
 class ReverSync(private val endpoint: String, private val token: String) {
+    data class Options(val pdfs: Boolean, val states: Boolean, val stats: Boolean,
+        val exceptions: Boolean, val pronunciation: Boolean = true)
     data class Result(val downloaded: Int, val uploaded: Int, val states: Int,
         val updatedLocally: Set<String>, val deletedLocally: Set<String>)
 
@@ -106,8 +109,14 @@ class ReverSync(private val endpoint: String, private val token: String) {
     }
 
     fun run(library: File, importPdf: (Uri, String) -> Unit,
-            publish: Boolean = false, playingBookId: String? = null): Result {
+            publish: Boolean = false, playingBookId: String? = null,
+            options: Options = Options(true, true, true, true), statistics: ReadingStats? = null): Result {
         val manifest = json("/manifest", playingBookId)
+        val features = manifest.optJSONObject("features")
+        val pdfSync = options.pdfs && (features?.optBoolean("pdfs", true) ?: true)
+        val stateSync = options.states && (features?.optBoolean("states", true) ?: true)
+        val statsSync = options.stats && features?.optBoolean("stats", false) == true
+        val exceptionSync = options.exceptions && features?.optBoolean("exceptions", false) == true
         val pcPlayingBookId = manifest.optString("playing_book_id")
         val remote = mutableMapOf<String, JSONObject>()
         val books = manifest.getJSONArray("books")
@@ -122,7 +131,7 @@ class ReverSync(private val endpoint: String, private val token: String) {
         val hiddenIds = (0 until (hidden?.length() ?: 0)).map { hidden!!.getString(it) }.toSet()
         val deletedLocally = mutableSetOf<String>()
         val deferredDeletions = mutableSetOf<String>()
-        if (publish) for (id in localDeleted.keys().asSequence().toList()) {
+        if (pdfSync && publish) for (id in localDeleted.keys().asSequence().toList()) {
             if (!id.matches(Regex("[0-9a-f]{20}"))) continue
             val deletedAt = localDeleted.optLong(id)
             if (remote[id]?.optLong("added_at", 0L) ?: 0L > deletedAt) {
@@ -135,7 +144,7 @@ class ReverSync(private val endpoint: String, private val token: String) {
                 remote.remove(id)
             }
         }
-        for (id in remoteDeleted.keys()) {
+        if (pdfSync) for (id in remoteDeleted.keys()) {
             if (!id.matches(Regex("[0-9a-f]{20}"))) continue
             val deletedAt = remoteDeleted.optLong(id)
             val folder = File(library, id)
@@ -152,7 +161,7 @@ class ReverSync(private val endpoint: String, private val token: String) {
                 localDeleted.put(id, deletedAt)
             remote.remove(id)
         }
-        if (localDeleted.length() > 0) deletedFile.writeText(localDeleted.toString(), Charsets.UTF_8)
+        if (pdfSync && localDeleted.length() > 0) deletedFile.writeText(localDeleted.toString(), Charsets.UTF_8)
         var downloaded = 0
         var uploaded = 0
         var states = 0
@@ -163,7 +172,7 @@ class ReverSync(private val endpoint: String, private val token: String) {
             val folder = File(library, id)
             if (localDeleted.optLong(id) >= item.optLong("added_at") && !folder.isDirectory)
                 continue
-            if (!File(folder, "document.pdf").isFile) {
+            if (pdfSync && !File(folder, "document.pdf").isFile) {
                 val request = connection("/books/$id/pdf")
                 val temp = File.createTempFile("rever-sync-", ".pdf", library.parentFile)
                 try {
@@ -194,14 +203,40 @@ class ReverSync(private val endpoint: String, private val token: String) {
             val id = folder.name
             if (id in deferredDeletions) continue
             if (id in hiddenIds) continue
-            if (publish && !remote.containsKey(id)) {
+            if (pdfSync && publish && !remote.containsKey(id)) {
                 val title = try { JSONObject(File(folder, "book.json").readText()).optString("title", "PDF") }
                     catch (_: Exception) { "PDF" }
                 val addedAt = try { JSONObject(File(folder, "book.json").readText()).optLong("added_at") }
                     catch (_: Exception) { 0L }
                 sendPdf(id, pdf, title, addedAt)
+                remote[id] = JSONObject().put("id", id)
                 uploaded++
             }
+            if (exceptionSync && remote.containsKey(id)) {
+                val exceptions = AudioExceptions(folder)
+                val localTime = exceptions.updatedAt
+                val remoteTime = remote[id]?.optLong("exceptions_updated_at", 0L) ?: 0L
+                if (remoteTime != localTime) {
+                    val index = File(folder, "paragraphs_index.json")
+                    val source = if (index.isFile) index else File(folder, "paragraphs.json")
+                    if (source.isFile) {
+                        val data = JSONArray(source.readText(Charsets.UTF_8))
+                        val paragraphs = (0 until data.length()).map { Paragraph.fromJson(data.getJSONObject(it)) }
+                        if (remoteTime > localTime) {
+                            exceptions.applySnapshot(json("/books/$id/exceptions"), paragraphs)
+                            exceptions.promoteForSync()
+                            updatedLocally.add(id)
+                        }
+                        val accepted = send("/books/$id/exceptions", exceptions.snapshot(paragraphs)
+                            .toString().toByteArray(Charsets.UTF_8))
+                        if (accepted.optLong("updated_at") > exceptions.updatedAt) {
+                            exceptions.applySnapshot(accepted, paragraphs)
+                            updatedLocally.add(id)
+                        }
+                    }
+                }
+            }
+            if (!stateSync || !remote.containsKey(id)) continue
             val stateFile = File(folder, "reader_state.json")
             val remoteState = remote[id]?.optJSONObject("state")
                 ?: if (uploaded > 0) json("/books/$id/state") else JSONObject()
@@ -235,6 +270,15 @@ class ReverSync(private val endpoint: String, private val token: String) {
                 updatedLocally.add(id)
                 states++
             }
+        }
+        if (statsSync && statistics != null) {
+            val merged = statistics.exchange(json("/stats"))
+            statistics.exchange(send("/stats", merged.toString().toByteArray(Charsets.UTF_8)))
+        }
+        if (options.pronunciation && features?.optBoolean("pronunciation", false) == true) {
+            val store = Pronunciations(library)
+            val merged = store.merge(json("/pronunciation"))
+            store.merge(send("/pronunciation", merged.toString().toByteArray(Charsets.UTF_8)))
         }
         return Result(downloaded, uploaded, states, updatedLocally, deletedLocally)
     }

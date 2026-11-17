@@ -7,7 +7,7 @@ import org.json.JSONObject
 import java.io.File
 import java.util.BitSet
 
-/** Reading history travels with the library in a Rever backup. */
+/** Cumulative times are stored per device so repeated syncs never count them twice. */
 class ReadingStats(context: Context) {
     private companion object { val fileLock = Any() }
     private val file = AtomicFile(File(context.filesDir, "reading_stats.json"))
@@ -16,9 +16,7 @@ class ReadingStats(context: Context) {
         JSONObject(file.openRead().bufferedReader().use { it.readText() })
     } catch (_: Exception) { JSONObject() }
 
-    private fun update(change: (JSONObject) -> Unit) = synchronized(fileLock) {
-        val data = read()
-        change(data)
+    private fun write(data: JSONObject) {
         val stream = file.startWrite()
         try {
             stream.write(data.toString().toByteArray(Charsets.UTF_8))
@@ -29,58 +27,117 @@ class ReadingStats(context: Context) {
         }
     }
 
-    @Synchronized fun markOpened(id: String) = update { data ->
-        val books = data.optJSONObject("books") ?: JSONObject().also { data.put("books", it) }
-        val book = books.optJSONObject(id) ?: JSONObject().also { books.put(id, it) }
-        book.put("started", true)
+    private fun update(change: (JSONObject) -> Unit) = synchronized(fileLock) {
+        val data = read()
+        change(data)
+        write(data)
     }
+
+    private fun book(data: JSONObject, id: String): JSONObject {
+        val books = data.optJSONObject("books") ?: JSONObject().also { data.put("books", it) }
+        return books.optJSONObject(id) ?: JSONObject().also { books.put(id, it) }
+    }
+
+    private fun bits(value: String): BitSet = try {
+        BitSet.valueOf(Base64.decode(value, Base64.DEFAULT))
+    } catch (_: Exception) { BitSet() }
+
+    @Synchronized fun markOpened(id: String) = update { book(it, id).put("started", true) }
 
     @Synchronized fun markPage(id: String, page: Int, total: Int) = update { data ->
         if (page !in 1..total) return@update
-        val books = data.optJSONObject("books") ?: JSONObject().also { data.put("books", it) }
-        val book = books.optJSONObject(id) ?: JSONObject().also { books.put(id, it) }
-        val bits = try { BitSet.valueOf(Base64.decode(book.optString("pages"), Base64.DEFAULT)) }
-            catch (_: Exception) { BitSet() }
-        bits.set(page - 1)
-        book.put("pages", Base64.encodeToString(bits.toByteArray(), Base64.NO_WRAP))
-        book.put("started", true)
-        if (bits.cardinality() >= total) book.put("completed", true)
+        val entry = book(data, id)
+        val pages = bits(entry.optString("pages"))
+        pages.set(page - 1)
+        entry.put("pages", Base64.encodeToString(pages.toByteArray(), Base64.NO_WRAP))
+        entry.put("started", true)
+        if (pages.cardinality() >= total) entry.put("completed", true)
     }
 
-    @Synchronized fun markCompleted(id: String) = update { data ->
-        val books = data.optJSONObject("books") ?: JSONObject().also { data.put("books", it) }
-        val book = books.optJSONObject(id) ?: JSONObject().also { books.put(id, it) }
-        book.put("completed", true)
-        book.put("started", true)
+    @Synchronized fun markCompleted(id: String) = update {
+        book(it, id).put("completed", true).put("started", true)
     }
 
     @Synchronized fun addDuration(id: String, key: String, millis: Long) {
         if (millis <= 0 || key !in setOf("reading_ms", "narration_ms")) return
         update { data ->
-            val books = data.optJSONObject("books") ?: JSONObject().also { data.put("books", it) }
-            val book = books.optJSONObject(id) ?: JSONObject().also { books.put(id, it) }
-            book.put(key, book.optLong(key) + millis)
+            val entry = book(data, id)
+            val devices = entry.optJSONObject("devices") ?: JSONObject().also { entry.put("devices", it) }
+            val legacy = entry.optLong(key)
+            if (legacy > 0) {
+                val old = devices.optJSONObject("android-legacy") ?: JSONObject().also {
+                    devices.put("android-legacy", it)
+                }
+                old.put(key, maxOf(old.optLong(key), legacy))
+                entry.remove(key)
+            }
+            val android = devices.optJSONObject("android") ?: JSONObject().also { devices.put("android", it) }
+            android.put(key, android.optLong(key) + millis)
         }
     }
 
     @Synchronized fun removeBook(id: String) = update { it.optJSONObject("books")?.remove(id) }
 
-    fun snapshot(existingIds: Set<String>): Snapshot = synchronized(fileLock) {
+    private fun mergeBook(target: JSONObject, incoming: JSONObject) {
+        target.put("started", target.optBoolean("started") || incoming.optBoolean("started"))
+        target.put("completed", target.optBoolean("completed") || incoming.optBoolean("completed"))
+        val pages = bits(target.optString("pages"))
+        pages.or(bits(incoming.optString("pages")))
+        target.put("pages", Base64.encodeToString(pages.toByteArray(), Base64.NO_WRAP))
+        val devices = target.optJSONObject("devices") ?: JSONObject().also { target.put("devices", it) }
+        for (source in arrayOf(target, incoming)) {
+            val legacy = devices.optJSONObject("android-legacy") ?: JSONObject().also {
+                devices.put("android-legacy", it)
+            }
+            for (key in arrayOf("reading_ms", "narration_ms"))
+                legacy.put(key, maxOf(legacy.optLong(key), source.optLong(key)))
+            val from = source.optJSONObject("devices") ?: continue
+            for (device in from.keys()) {
+                if (device.length > 80) continue
+                val values = from.optJSONObject(device) ?: continue
+                val dest = devices.optJSONObject(device) ?: JSONObject().also { devices.put(device, it) }
+                for (key in arrayOf("reading_ms", "narration_ms"))
+                    dest.put(key, maxOf(dest.optLong(key), values.optLong(key)))
+            }
+        }
+        target.remove("reading_ms")
+        target.remove("narration_ms")
+    }
+
+    fun exchange(remote: JSONObject): JSONObject = synchronized(fileLock) {
         val data = read()
-        val books = data.optJSONObject("books") ?: JSONObject()
+        val incoming = remote.optJSONObject("books") ?: JSONObject()
+        val books = data.optJSONObject("books") ?: JSONObject().also { data.put("books", it) }
+        for (id in incoming.keys()) {
+            if (!id.matches(Regex("[0-9a-f]{20}"))) continue
+            val source = incoming.optJSONObject(id) ?: continue
+            mergeBook(book(data, id), source)
+        }
+        for (id in books.keys()) books.optJSONObject(id)?.let { mergeBook(it, JSONObject()) }
+        write(data)
+        data
+    }
+
+    fun snapshot(existingIds: Set<String>): Snapshot = synchronized(fileLock) {
+        val books = read().optJSONObject("books") ?: JSONObject()
         var started = 0
         var completed = 0
         var pages = 0
         var readingMs = 0L
         var narrationMs = 0L
         for (id in existingIds) {
-            val book = books.optJSONObject(id) ?: continue
-            if (book.optBoolean("started")) started++
-            if (book.optBoolean("completed")) completed++
-            readingMs += book.optLong("reading_ms")
-            narrationMs += book.optLong("narration_ms")
-            pages += try { BitSet.valueOf(Base64.decode(book.optString("pages"), Base64.DEFAULT)).cardinality() }
-                catch (_: Exception) { 0 }
+            val entry = books.optJSONObject(id) ?: continue
+            if (entry.optBoolean("started")) started++
+            if (entry.optBoolean("completed")) completed++
+            pages += bits(entry.optString("pages")).cardinality()
+            readingMs += entry.optLong("reading_ms")
+            narrationMs += entry.optLong("narration_ms")
+            val devices = entry.optJSONObject("devices") ?: continue
+            for (device in devices.keys()) {
+                val values = devices.optJSONObject(device) ?: continue
+                readingMs += values.optLong("reading_ms")
+                narrationMs += values.optLong("narration_ms")
+            }
         }
         Snapshot(readingMs, narrationMs, started, completed, pages)
     }

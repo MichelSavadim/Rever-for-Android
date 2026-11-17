@@ -30,7 +30,10 @@ class PdfCanvasView(context: Context) : View(context) {
     private val paper = Paint().apply { color = Color.WHITE }
     // White page pixels reveal the marker below; dark glyphs keep their original ink color.
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply { blendMode = BlendMode.MULTIPLY }
-    private val highlightPaint = Paint().apply { color = 0x69FFD700 }
+    private val highlightPaint = Paint().apply {
+        color = 0x69FFD700
+        blendMode = BlendMode.MULTIPLY
+    }
     private val searchPaint = Paint().apply { color = 0x66FF9800 }
     private val cache = object : LruCache<Int, Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount
@@ -54,13 +57,12 @@ class PdfCanvasView(context: Context) : View(context) {
     private var lastScaleFocusY = 0f
     private val margin = 16f * resources.displayMetrics.density
     private val gap = 14f * resources.displayMetrics.density
-    private val highlightRise = 3f * resources.displayMetrics.density
     var onPageTap: ((page: Int, x: Float, y: Float) -> Unit)? = null
     var onVisiblePageChanged: ((page: Int) -> Unit)? = null
     var onViewportMoved: (() -> Unit)? = null
     private var visiblePage = 0
     private var selectedPage = 0
-    private var selectedBox: RectF? = null
+    private var selectedBoxes: List<RectF> = emptyList()
     private var searchBoxes: Map<Int, List<RectF>> = emptyMap()
 
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -159,7 +161,7 @@ class PdfCanvasView(context: Context) : View(context) {
         horizontalPixels = 0f
         zoom = 1f
         selectedPage = 0
-        selectedBox = null
+        selectedBoxes = emptyList()
         searchBoxes = emptyMap()
         visiblePage = 0
         invalidate()
@@ -228,9 +230,9 @@ class PdfCanvasView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun setHighlight(page: Int, box: RectF?) {
+    fun setHighlight(page: Int, boxes: List<RectF>) {
         selectedPage = page
-        selectedBox = box
+        selectedBoxes = boxes
         invalidate()
     }
 
@@ -291,25 +293,27 @@ class PdfCanvasView(context: Context) : View(context) {
                 canvas.drawRect(pageRect, paper)
                 val bitmap = cache.get(index)
                 val desiredWidth = safeBitmapWidth(index, min(2048, max(512, pageWidth.toInt())))
-                if (selectedPage == index + 1) {
-                    selectedBox?.let { box ->
-                        canvas.save()
-                        canvas.clipRect(pageRect)
-                        canvas.drawRect(
-                            left + box.left * pageWidth / size.first,
-                            y + box.top * pageHeight / size.second - highlightRise,
-                            left + box.right * pageWidth / size.first,
-                            y + box.bottom * pageHeight / size.second - highlightRise,
-                            highlightPaint
-                        )
-                        canvas.restore()
-                    }
-                }
                 if (bitmap != null && !bitmap.isRecycled) {
                     canvas.drawBitmap(bitmap, null, pageRect, bitmapPaint)
                     if (bitmap.width < desiredWidth * 0.75f) requestPage(index, desiredWidth)
                 } else {
                     requestPage(index, desiredWidth)
+                }
+                if (selectedPage == index + 1) {
+                    if (selectedBoxes.isNotEmpty()) {
+                        canvas.save()
+                        canvas.clipRect(pageRect)
+                        for (box in selectedBoxes) {
+                            canvas.drawRect(
+                                left + box.left * pageWidth / size.first,
+                                y + box.top * pageHeight / size.second,
+                                left + box.right * pageWidth / size.first,
+                                y + box.bottom * pageHeight / size.second,
+                                highlightPaint
+                            )
+                        }
+                        canvas.restore()
+                    }
                 }
                 for (box in searchBoxes[index + 1].orEmpty()) {
                     canvas.drawRect(

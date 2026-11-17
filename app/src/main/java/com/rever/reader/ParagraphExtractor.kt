@@ -24,7 +24,8 @@ data class GlyphBox(val start: Int, val end: Int, val box: RectF) {
 
 data class Paragraph(
     val page: Int, val index: Int, val text: String, val box: RectF,
-    val rawText: String = text, val glyphs: List<GlyphBox> = emptyList()
+    val rawText: String = text, val glyphs: List<GlyphBox> = emptyList(),
+    val lineBoxes: List<RectF> = emptyList()
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("page", page)
@@ -33,6 +34,22 @@ data class Paragraph(
         .put("bbox", JSONArray().put(box.left).put(box.top).put(box.right).put(box.bottom))
         .put("raw_text", rawText)
         .put("glyphs", JSONArray().apply { glyphs.forEach { put(it.toJson()) } })
+        .put("line_boxes", JSONArray().apply { lineBoxes.forEach { box ->
+            put(JSONArray().put(box.left).put(box.top).put(box.right).put(box.bottom))
+        } })
+
+    fun highlightBoxes(): List<RectF> {
+        if (lineBoxes.isNotEmpty()) return lineBoxes
+        if (glyphs.isEmpty()) return listOf(box)
+        val lines = mutableListOf<RectF>()
+        for (glyph in glyphs.sortedWith(compareBy<GlyphBox> { it.box.top }.thenBy { it.box.left })) {
+            val last = lines.lastOrNull()
+            if (last != null && kotlin.math.abs(last.top - glyph.box.top) <
+                maxOf(last.height(), glyph.box.height()) * .45f) last.union(glyph.box)
+            else lines.add(RectF(glyph.box))
+        }
+        return lines
+    }
 
     fun matchBoxes(query: String): List<RectF> {
         val term = query.trim().replace(Regex("\\s+"), " ")
@@ -76,19 +93,25 @@ data class Paragraph(
         fun fromJson(data: JSONObject): Paragraph {
             val bbox = data.getJSONArray("bbox")
             val dataGlyphs = data.optJSONArray("glyphs")
+            val dataLines = data.optJSONArray("line_boxes")
             return Paragraph(data.getInt("page"), data.getInt("index"), data.getString("text"),
                 RectF(bbox.getDouble(0).toFloat(), bbox.getDouble(1).toFloat(),
                     bbox.getDouble(2).toFloat(), bbox.getDouble(3).toFloat()),
                 data.optString("raw_text", data.getString("text")),
                 if (dataGlyphs == null) emptyList() else (0 until dataGlyphs.length())
-                    .map { GlyphBox.fromJson(dataGlyphs.getJSONArray(it)) })
+                    .map { GlyphBox.fromJson(dataGlyphs.getJSONArray(it)) },
+                if (dataLines == null) emptyList() else (0 until dataLines.length()).map { number ->
+                    val line = dataLines.getJSONArray(number)
+                    RectF(line.getDouble(0).toFloat(), line.getDouble(1).toFloat(),
+                        line.getDouble(2).toFloat(), line.getDouble(3).toFloat())
+                })
         }
     }
 }
 
 /** Uses PDFBox text positions and breaks a paragraph when a line ends in a full stop. */
 object ParagraphExtractor {
-    const val VERSION = 4
+    const val VERSION = 6
 
     fun extractToFiles(context: Context, pdfFile: File, folder: File): List<Paragraph> {
         PDFBoxResourceLoader.init(context.applicationContext)
@@ -121,7 +144,8 @@ object ParagraphExtractor {
                                 first = false
                                 fullWriter.write(paragraph.toJson().toString())
                                 val light = Paragraph(paragraph.page, paragraph.index,
-                                    paragraph.text, paragraph.box)
+                                    paragraph.text, paragraph.box,
+                                    lineBoxes = paragraph.highlightBoxes())
                                 compact.add(light)
                                 indexWriter.write(light.toJson().toString())
                             }
@@ -150,10 +174,9 @@ object ParagraphExtractor {
             val previous = merged.lastOrNull()
             val a = previous?.box
             val b = part.box
-            val overlap = if (a == null) 0f else (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0f)
-            val sameColumn = a != null && overlap > minOf(a.width(), b.width()) * .45f &&
-                kotlin.math.abs(a.left - b.left) < 42f
-            val close = a != null && b.top - a.bottom < 4f && b.top - a.bottom > -24f
+            val sameColumn = a != null && kotlin.math.abs(a.left - b.left) <= 45f &&
+                minOf(a.right, b.right) > maxOf(a.left, b.left)
+            val close = a != null && b.top - a.bottom in -3f..8f
             if (previous != null && !previous.text.trimEnd().endsWith('.') && sameColumn && close) {
                 val box = RectF(a!!).apply { union(b) }
                 val shift = previous.rawText.length + 1
@@ -185,10 +208,13 @@ object ParagraphExtractor {
                 val x = position.xDirAdj
                 val y = position.yDirAdj
                 val right = x + position.widthDirAdj
-                val bottom = y + position.heightDir
+                val measuredHeight = position.heightDir
+                val reliableHeight = if (measuredHeight >= 2f) measuredHeight else
+                    position.fontSizeInPt.coerceIn(10f, 24f)
+                val bottom = y + reliableHeight * .25f
                 val current = bounds
                 // PDFBox's yDirAdj follows the text baseline. Include the glyphs above it.
-                val top = y - position.heightDir
+                val top = y - reliableHeight
                 if (current == null) bounds = RectF(x, top, right, bottom)
                 else current.union(x, top, right, bottom)
                 val unicode = position.unicode

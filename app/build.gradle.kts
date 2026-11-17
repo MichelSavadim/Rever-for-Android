@@ -13,8 +13,8 @@ android {
         applicationId = "com.rever.reader"
         minSdk = 34
         targetSdk = 34
-        versionCode = 10106
-        versionName = "1.1.4"
+        versionCode = 10107
+        versionName = "1.1.5"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

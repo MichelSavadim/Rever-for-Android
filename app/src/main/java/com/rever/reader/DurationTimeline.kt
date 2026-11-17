@@ -72,7 +72,7 @@ class DurationTimeline private constructor(
         private val word = Regex("[\\p{L}\\p{N}]+")
 
         fun load(folder: File, paragraphs: List<Paragraph>, voice: String,
-                 ignored: Set<String>): DurationTimeline {
+                 ignored: Set<String>, exceptions: AudioExceptions = AudioExceptions(folder)): DurationTimeline {
             val file = File(folder, "timing.json")
             val saved = try { if (file.isFile) JSONObject(file.readText(Charsets.UTF_8)) else JSONObject() }
                 catch (_: Exception) { JSONObject() }
@@ -80,17 +80,16 @@ class DurationTimeline private constructor(
                 saved.optInt("paragraph_version") == ParagraphExtractor.VERSION &&
                 saved.optJSONArray("base_ms")?.length() == paragraphs.size
             val valid = compatible && saved.optInt("version") == VERSION
-            val base = if (valid) {
-                val stored = saved.getJSONArray("base_ms")
-                LongArray(paragraphs.size) { stored.optLong(it).coerceAtLeast(0L) }
-            } else LongArray(paragraphs.size) { index ->
-                if (paragraphs[index].text in ignored) 0L else estimate(paragraphs[index].text)
+            val base = LongArray(paragraphs.size) { index ->
+                if (NarrationFiles.automaticSpeech(paragraphs[index], ignored, exceptions))
+                    estimate(paragraphs[index].text) else 0L
             }
             val data = if (valid) saved else JSONObject()
                 .put("version", VERSION)
                 .put("paragraph_version", ParagraphExtractor.VERSION)
                 .put("base_ms", JSONArray().apply { base.forEach { put(it) } })
                 .put("voices", if (compatible) saved.optJSONObject("voices") ?: JSONObject() else JSONObject())
+            data.put("base_ms", JSONArray().apply { base.forEach { put(it) } })
             val values = data.optJSONObject("voices")?.optJSONObject(voice)
             val actual = mutableMapOf<Int, Long>()
             values?.keys()?.forEach { key ->

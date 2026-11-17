@@ -214,6 +214,7 @@ class MainActivity : Activity() {
     private var paragraphs: List<Paragraph> = emptyList()
     private var ignoredTexts: Set<String> = emptySet()
     private var selectedParagraph: Paragraph? = null
+    private var audioExceptions: AudioExceptions? = null
     private var voicePreview: MediaPlayer? = null
     private var voicePreviewFile: File? = null
     private var centerSelectionAfterRotation = false
@@ -243,10 +244,18 @@ class MainActivity : Activity() {
             }
             onViewportMoved = { showPageControls() }
             onPageTap = { number, x, y ->
-                val hit = paragraphs.firstOrNull { paragraph ->
-                    paragraph.page == number && RectF(paragraph.box).apply {
-                        inset(-4f, -4f)
-                    }.contains(x, y)
+                val onPage = paragraphs.filter { it.page == number && !it.box.isEmpty }
+                val hit = onPage.firstOrNull { paragraph ->
+                    RectF(paragraph.box).apply { inset(-6f, -6f) }.contains(x, y)
+                } ?: onPage.minByOrNull { paragraph ->
+                    val box = paragraph.box
+                    val dx = when { x < box.left -> box.left - x; x > box.right -> x - box.right; else -> 0f }
+                    val dy = when { y < box.top -> box.top - y; y > box.bottom -> y - box.bottom; else -> 0f }
+                    dx * dx + dy * dy
+                }?.takeIf { paragraph ->
+                    val box = paragraph.box
+                    x >= box.left - 24f && x <= box.right + 24f &&
+                        y >= box.top - 24f && y <= box.bottom + 24f
                 }
                 if (hit != null) {
                     selectedParagraph = if (selectedParagraph?.page == hit.page &&
@@ -617,9 +626,11 @@ class MainActivity : Activity() {
     private fun startParagraph(index: Int, manual: Boolean = false) {
         val book = activeBook ?: return
         val paragraph = paragraphs.getOrNull(index) ?: return
-        if (!NarrationFiles.hasSpeech(paragraph.text) || (!manual && paragraph.text in ignoredTexts)) {
+        if (!NarrationFiles.hasSpeech(paragraph.text) ||
+            audioExceptions?.contains(paragraph, if (manual) emptySet() else ignoredTexts) == true ||
+            !manual && audioExceptions == null && paragraph.text in ignoredTexts) {
             val next = ((index + 1) until paragraphs.size).firstOrNull {
-                NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+                NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts, audioExceptions)
             }
             if (next != null) startParagraph(next)
             return
@@ -685,9 +696,9 @@ class MainActivity : Activity() {
             ?: paragraphs.indexOfFirst { it == selectedParagraph }.takeIf { it >= 0 }
             ?: paragraphs.indexOfFirst { it.page >= currentPage }
         val target = (if (delta >= 0) ((current + 1)..paragraphs.lastIndex).firstOrNull {
-            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts, audioExceptions)
         } else if (current > 0) (current - 1 downTo 0).firstOrNull {
-            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts)
+            NarrationFiles.automaticSpeech(paragraphs[it], ignoredTexts, audioExceptions)
         } else null) ?: return
         if (target in paragraphs.indices) startParagraph(target)
     }
@@ -697,9 +708,9 @@ class MainActivity : Activity() {
             ?.let { paragraphs.getOrNull(it)?.page } ?: currentPage
         val targetPage = current + delta
         val target = if (delta >= 0) paragraphs.indexOfFirst {
-            it.page >= targetPage && NarrationFiles.automaticSpeech(it, ignoredTexts)
+            it.page >= targetPage && NarrationFiles.automaticSpeech(it, ignoredTexts, audioExceptions)
         } else paragraphs.indexOfLast {
-            it.page <= targetPage && NarrationFiles.automaticSpeech(it, ignoredTexts)
+            it.page <= targetPage && NarrationFiles.automaticSpeech(it, ignoredTexts, audioExceptions)
         }
         if (target >= 0) startParagraph(target)
     }
@@ -779,6 +790,15 @@ class MainActivity : Activity() {
                     closePanel(); startExport(book, 1, book.pageCount)
                 })
                 content.addView(button("Gerar áudio por páginas selecionadas") { showExportDialog() })
+                content.addView(button("Exceção") { closePanel(); addAudioException() })
+                content.addView(button("Lista de Exceções") { closePanel(); showAudioExceptions() })
+                content.addView(button("Pronúncia") {
+                    closePanel()
+                    PronunciationDialog.show(this, library, book.folder) {
+                        queueStorageSync()
+                        queueReverSync(immediate = true)
+                    }
+                })
                 content.addView(button("Abrir pasta do PDF") { closePanel(); showBookFiles(book) })
             }
         }
@@ -852,6 +872,7 @@ class MainActivity : Activity() {
             activeBook = null
             paragraphs = emptyList()
             ignoredTexts = emptySet()
+            audioExceptions = null
             timeline = null
             selectedParagraph = null
             cancelSearch()
@@ -1068,6 +1089,12 @@ class MainActivity : Activity() {
         screen.addView(button("Narração") { showNarrationSettings() })
         screen.addView(button("Dados e Armazenamento") { showDataSettings() })
         screen.addView(button("Estatísticas") { showStatistics() })
+        screen.addView(button("Pronúncia") {
+            PronunciationDialog.show(this, library, activeBook?.folder) {
+                queueStorageSync()
+                queueReverSync(immediate = true)
+            }
+        })
         screen.addView(button("Modo escuro: ${if (darkMode()) "ligado" else "desligado"}") {
             getPreferences(MODE_PRIVATE).edit()
                 .putBoolean("dark_mode", !darkMode()).apply()
@@ -1733,6 +1760,24 @@ class MainActivity : Activity() {
             }
             showDeveloperOptions()
         })
+        screen.addView(TextView(this).apply {
+            text = "Sincronizar nos dois sentidos:"
+            setTextColor(textColor())
+            setPadding(0, dp(16), 0, dp(4))
+        })
+        for ((key, label) in listOf("pdfs" to "PDFs", "states" to "Pontos de leitura",
+            "stats" to "Estatísticas", "exceptions" to "Exceções de áudio",
+            "pronunciation" to "Pronúncia")) {
+            screen.addView(android.widget.CheckBox(this).apply {
+                text = label
+                setTextColor(textColor())
+                isChecked = prefs.getBoolean("rever_sync_$key", true)
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.edit().putBoolean("rever_sync_$key", checked).apply()
+                    if (checked) queueReverSync(immediate = true)
+                }
+            })
+        }
         screen.addView(button("Sincronizar agora") {
             save()
             syncWithPc(true, true)
@@ -1748,6 +1793,12 @@ class MainActivity : Activity() {
         val prefs = getPreferences(MODE_PRIVATE)
         val endpoint = prefs.getString("rever_sync_endpoint", "").orEmpty()
         val token = prefs.getString("rever_sync_token", "").orEmpty()
+        val options = ReverSync.Options(
+            prefs.getBoolean("rever_sync_pdfs", true),
+            prefs.getBoolean("rever_sync_states", true),
+            prefs.getBoolean("rever_sync_stats", true),
+            prefs.getBoolean("rever_sync_exceptions", true),
+            prefs.getBoolean("rever_sync_pronunciation", true))
         val playingBookId = activeBook?.id?.takeIf { mediaController?.isPlaying == true }
             ?: if (publish) pendingPlayingBookId else null
         val publishGeneration = reverStateGeneration
@@ -1756,11 +1807,13 @@ class MainActivity : Activity() {
             var succeeded = false
             try {
                 val result = ReverSync(endpoint, token).run(library,
-                    { uri, name -> importBook(uri, name, null) }, publish, playingBookId)
+                    { uri, name -> importBook(uri, name, null) }, publish, playingBookId,
+                    options, readingStats)
                 succeeded = true
                 if (publish && publishGeneration == reverStateGeneration)
                     pendingPlayingBookId = null
                 runOnUiThread {
+                    result.deletedLocally.forEach { readingStats.removeBook(it) }
                     if (activeBook?.id in result.deletedLocally) showLibrary()
                     else if ((result.downloaded > 0 || result.deletedLocally.isNotEmpty()) &&
                         screenMode == "library") showLibrary()
@@ -1768,6 +1821,13 @@ class MainActivity : Activity() {
                     if (screenMode == "reader" && openBook != null &&
                         openBook.id in result.updatedLocally && mediaController?.isPlaying != true) {
                         showBook(openBook, syncOnOpen = false)
+                    } else if (screenMode == "reader" && openBook != null &&
+                        openBook.id in result.updatedLocally) {
+                        audioExceptions = AudioExceptions(openBook.folder)
+                        startService(Intent(this, PlaybackService::class.java).apply {
+                            action = PlaybackService.ACTION_REFRESH_EXCEPTIONS
+                        })
+                        reloadTimelineForVoice()
                     }
                     if (manual) Toast.makeText(this,
                         "Sincronizado: ${result.downloaded} recebido(s), ${result.uploaded} enviado(s), ${result.states} posição(ões).",
@@ -2293,7 +2353,7 @@ class MainActivity : Activity() {
                 val pageNumber = input.text.toString().toIntOrNull()
                 if (pageNumber != null && pageNumber in 1..book.pageCount) {
                     val index = paragraphs.indexOfFirst {
-                        it.page >= pageNumber && NarrationFiles.automaticSpeech(it, ignoredTexts)
+                        it.page >= pageNumber && NarrationFiles.automaticSpeech(it, ignoredTexts, audioExceptions)
                     }
                     if (index >= 0) startParagraph(index)
                 }
@@ -2530,7 +2590,7 @@ class MainActivity : Activity() {
                 .put("added_at", addedAt).put("last_read_at", 0L).toString())
             if (categoryId != null) categoryStore.assign(folder, setOf(categoryId))
             val initialTiming = DurationTimeline.load(folder, extracted, currentVoice(),
-                NarrationFiles.ignored(folder, extracted))
+                NarrationFiles.ignored(folder, extracted), AudioExceptions(folder))
             writeTextAtomic(initialTiming.file, initialTiming.snapshot())
             queueStorageSync()
             return Book(id, title, count, folder, addedAt, 0L)
@@ -2600,7 +2660,9 @@ class MainActivity : Activity() {
             val metadata = JSONObject(File(book.folder, "book.json").readText(Charsets.UTF_8))
             metadata.put("last_read_at", System.currentTimeMillis())
             writeTextAtomic(File(book.folder, "book.json"), metadata.toString())
-            val rebuildParagraphs = metadata.optInt("paragraph_version", 0) < ParagraphExtractor.VERSION
+            val paragraphFile = File(book.folder, "paragraphs.json")
+            val rebuildParagraphs = metadata.optInt("paragraph_version", 0) < ParagraphExtractor.VERSION ||
+                !paragraphFile.isFile || book.pdf.lastModified() > paragraphFile.lastModified() + 2_000
             val state = File(book.folder, "reader_state.json")
             val savedState = if (state.isFile) JSONObject(state.readText(Charsets.UTF_8)) else JSONObject()
             activeStateTimestamp = savedState.optLong("updated_at", if (state.isFile) state.lastModified() else 0L)
@@ -2621,6 +2683,7 @@ class MainActivity : Activity() {
             readingStats.markOpened(book.id)
             paragraphs = emptyList()
             ignoredTexts = emptySet()
+            audioExceptions = AudioExceptions(book.folder)
             cancelSearch()
             timeline = null
             renderAudioTime()
@@ -2673,7 +2736,10 @@ class MainActivity : Activity() {
             io.execute {
                 try {
                     val loaded = if (rebuildParagraphs) {
+                        val oldParagraphs = try { loadParagraphs(book) } catch (_: Exception) { emptyList() }
                         val extracted = ParagraphExtractor.extractToFiles(this, book.pdf, book.folder)
+                        if (oldParagraphs.isNotEmpty())
+                            AudioExceptions(book.folder).remap(oldParagraphs, extracted)
                         metadata.put("paragraph_count", extracted.size)
                             .put("paragraph_version", ParagraphExtractor.VERSION)
                         writeTextAtomic(File(book.folder, "book.json"), metadata.toString())
@@ -2684,12 +2750,13 @@ class MainActivity : Activity() {
                         if (loadToken == bookLoadToken && activeBook?.id == book.id) {
                             paragraphs = loaded
                             ignoredTexts = ignored
+                            audioExceptions = AudioExceptions(book.folder)
                             selectedParagraph = savedParagraph?.let { reference ->
                                 val anchor = reference.optString("text").replace(Regex("\\s+"), " ")
                                     .trim().lowercase()
                                 loaded.firstOrNull { it.page == reference.optInt("page") &&
                                     anchor.isNotEmpty() && it.text.replace(Regex("\\s+"), " ")
-                                        .trim().lowercase().startsWith(anchor) }
+                                        .trim().lowercase().contains(anchor) }
                                     ?: loaded.firstOrNull { it.page == reference.optInt("page") &&
                                         it.index == reference.optInt("index") }
                             }
@@ -2705,7 +2772,8 @@ class MainActivity : Activity() {
                         }
                     }
                     val timelineVoice = currentVoice()
-                    val loadedTimeline = DurationTimeline.load(book.folder, loaded, timelineVoice, ignored)
+                    val loadedTimeline = DurationTimeline.load(book.folder, loaded, timelineVoice,
+                        ignored, AudioExceptions(book.folder))
                     writeTextAtomic(loadedTimeline.file, loadedTimeline.snapshot())
                     runOnUiThread {
                         if (loadToken == bookLoadToken && activeBook?.id == book.id) {
@@ -2767,7 +2835,7 @@ class MainActivity : Activity() {
     private fun refreshHighlight() {
         val playing = if (mediaController?.isPlaying == true) paragraphs.getOrNull(audioParagraphIndex) else null
         val highlighted = playing ?: if (searchActive) null else selectedParagraph
-        viewer.setHighlight(highlighted?.page ?: 0, highlighted?.box)
+        viewer.setHighlight(highlighted?.page ?: 0, highlighted?.highlightBoxes().orEmpty())
     }
 
     private fun followParagraph(paragraph: Paragraph) {
@@ -2881,7 +2949,8 @@ class MainActivity : Activity() {
         timeline = null
         renderAudioTime()
         io.execute {
-            val updated = DurationTimeline.load(book.folder, loadedParagraphs, voice, ignoredTexts)
+            val updated = DurationTimeline.load(book.folder, loadedParagraphs, voice,
+                ignoredTexts, AudioExceptions(book.folder))
             writeTextAtomic(updated.file, updated.snapshot())
             runOnUiThread {
                 if (loadToken == bookLoadToken && activeBook?.id == book.id && currentVoice() == voice) {
@@ -2890,6 +2959,105 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun refreshExceptionsAfterChange() {
+        val book = activeBook ?: return
+        if (mediaController?.currentMediaItem != null) {
+            mediaController?.pause()
+            mediaController?.clearMediaItems()
+            audioParagraphIndex = -1
+            playButton.text = "▶"
+            startService(Intent(this, PlaybackService::class.java).apply {
+                action = PlaybackService.ACTION_CONFIGURE
+                putExtra(PlaybackService.EXTRA_BOOK_ID, book.id)
+                putExtra(PlaybackService.EXTRA_VOICE, currentVoice())
+            })
+        }
+        reloadTimelineForVoice()
+        queueStorageSync()
+        queueReverSync(publish = true, immediate = true)
+        refreshHighlight()
+    }
+
+    private fun addAudioException() {
+        val selected = selectedParagraph
+        val exceptions = audioExceptions
+        if (selected == null || exceptions == null || paragraphs.isEmpty()) {
+            Toast.makeText(this, "Selecione primeiro um parágrafo no PDF.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (exporting) {
+            Toast.makeText(this, "Aguarde ou cancele a exportação atual.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        form.addView(TextView(this).apply {
+            text = selected.text.take(300)
+            setTextColor(Color.DKGRAY)
+        })
+        val byText = android.widget.CheckBox(this).apply {
+            text = "Pelo texto: todos que contenham esta sequência exata"
+            setTextColor(Color.DKGRAY)
+        }
+        val byPosition = android.widget.CheckBox(this).apply {
+            text = "Pela posição: todos nesta posição das páginas"
+            setTextColor(Color.DKGRAY)
+        }
+        form.addView(byText)
+        form.addView(byPosition)
+        form.addView(TextView(this).apply {
+            text = "Sem marcar opções, somente este parágrafo será ignorado."
+            setTextColor(Color.DKGRAY)
+        })
+        AlertDialog.Builder(this).setTitle("Adicionar exceção")
+            .setView(form)
+            .setPositiveButton("Adicionar") { _, _ ->
+                val count = exceptions.add(selected, paragraphs, byText.isChecked, byPosition.isChecked)
+                refreshExceptionsAfterChange()
+                Toast.makeText(this, "$count parágrafo(s) adicionado(s).", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun showAudioExceptions() {
+        val exceptions = audioExceptions ?: return
+        val matches = paragraphs.filter { exceptions.contains(it, ignoredTexts) }
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        if (matches.isEmpty()) list.addView(TextView(this).apply {
+            text = "Nenhum parágrafo marcado como exceção."
+            setTextColor(Color.DKGRAY)
+        })
+        for (paragraph in matches) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(this).apply {
+                text = "Pág. ${paragraph.page}, §${paragraph.index}: ${paragraph.text.take(170)}"
+                setTextColor(Color.DKGRAY)
+                setPadding(0, dp(8), dp(8), dp(8))
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(button("X") {
+                if (exporting) {
+                    Toast.makeText(this, "Aguarde ou cancele a exportação atual.", Toast.LENGTH_LONG).show()
+                    return@button
+                }
+                exceptions.remove(paragraph)
+                list.removeView(row)
+                refreshExceptionsAfterChange()
+            })
+            list.addView(row)
+        }
+        AlertDialog.Builder(this).setTitle("Lista de Exceções")
+            .setView(ScrollView(this).apply { addView(list) })
+            .setPositiveButton("Fechar", null).show()
     }
 
     private fun showExportDialog() {
@@ -2953,7 +3121,7 @@ class MainActivity : Activity() {
     private fun startExport(book: Book, first: Int, last: Int) {
         val voice = currentVoice()
         val entries = paragraphs.filter {
-            it.page in first..last && NarrationFiles.automaticSpeech(it, ignoredTexts)
+            it.page in first..last && NarrationFiles.automaticSpeech(it, ignoredTexts, audioExceptions)
         }
         if (entries.isEmpty()) {
             Toast.makeText(this, "Esse intervalo não contém texto narrável.", Toast.LENGTH_LONG).show()

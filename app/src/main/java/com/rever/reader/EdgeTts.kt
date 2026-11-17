@@ -52,7 +52,11 @@ object EdgeTts {
 
 object NarrationEngine {
     fun generate(context: Context, paragraph: Paragraph, output: File, voiceId: String) {
-        if (EdgeTts.isSelected(voiceId)) EdgeTts.generate(context, paragraph, output, voiceId)
-        else AndroidTts.generate(context, paragraph, output, voiceId)
+        val folder = generateSequence(output.parentFile) { it.parentFile }
+            .firstOrNull { File(it, "document.pdf").isFile }
+        val spoken = if (folder == null) paragraph else paragraph.copy(
+            text = Pronunciations(folder.parentFile!!).apply(folder, paragraph.text))
+        if (EdgeTts.isSelected(voiceId)) EdgeTts.generate(context, spoken, output, voiceId)
+        else AndroidTts.generate(context, spoken, output, voiceId)
     }
 }

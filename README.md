@@ -1,6 +1,6 @@
 # Rever para Android
 
-Leitor de PDF com narração pelo TTS local do Android ou pelo Edge TTS online, e exportação de áudio em MP3. A versão 1.1.4 foi preparada para Android 14. A biblioteca, os parágrafos, o ponto de leitura, as categorias e os áudios ficam no armazenamento interno do aplicativo ou na pasta escolhida em **Dados e Armazenamento**. O Android exige uma cópia de trabalho interna para abrir PDFs e gerar áudio quando uma pasta externa é escolhida. Opções de desenvolvedor foram adicionadas para recursos pessoais de sincronização. A sincronização consulta o PC ao iniciar e abrir um PDF, verifica novidades a cada 60 segundos e envia mudanças de parágrafo ou biblioteca; um aparelho em reprodução tem prioridade sobre outro parado. Excluir um PDF por completo também o remove do outro aparelho quando ambos voltarem a se conectar.
+Leitor de PDF com narração pelo TTS local do Android ou pelo Edge TTS online, e exportação de áudio em MP3. A versão 1.1.5 foi preparada para Android 14. A biblioteca, os parágrafos, o ponto de leitura, as categorias e os áudios ficam no armazenamento interno do aplicativo ou na pasta escolhida em **Dados e Armazenamento**. O Android exige uma cópia de trabalho interna para abrir PDFs e gerar áudio quando uma pasta externa é escolhida. Opções de desenvolvedor foram adicionadas para recursos pessoais de sincronização. A sincronização consulta o PC ao iniciar e abrir um PDF, verifica novidades a cada 60 segundos e envia mudanças de parágrafo ou biblioteca; um aparelho em reprodução tem prioridade sobre outro parado. Em **Opções de desenvolvedor**, PDFs, pontos de leitura, estatísticas e exceções de áudio podem ser ligados separadamente; uma opção desligada impede envio e recebimento do dado neste aparelho. A troca ocorre quando a mesma opção está ligada também no PC. Excluir um PDF por completo também o remove do outro aparelho quando ambos voltarem a se conectar e PDFs estiverem habilitados.
 
 Em **Configurações → Narração → Motor**, escolha Android para gerar voz offline ou Edge TTS para usar vozes online. Edge TTS precisa de internet e envia o texto de cada trecho ao serviço de voz; a reprodução dos MP3s já gerados funciona offline. Cada motor mantém sua escolha de idioma e voz. O app inclui `edge-tts` 7.3.1 e usa o serviço de leitura em voz alta do Microsoft Edge, que pode mudar ou ficar indisponível sem aviso.
 
@@ -11,6 +11,8 @@ Uma correção da 1.1.2 processa a pesquisa em segundo plano, lendo as posiçõe
 Os relatórios em **Configurações → Relatórios de falha** registram a pilha completa das exceções Java, dados de memória e a operação recente. Na pesquisa, registram a etapa, a página e o tamanho do termo, sem salvar o termo pesquisado. Quando o Android disponibiliza um rastro de encerramento, ele é salvo junto do relatório.
 
 ## Dados, backup e estatísticas
+
+No leitor, selecione um parágrafo e use **Exceção** no painel direito para ignorá-lo na narração. A regra pode alcançar também trechos com o mesmo texto ou na mesma posição das páginas. **Lista de Exceções** mostra cada trecho afetado e permite liberá-lo individualmente pelo X.
 
 Em **Configurações → Dados e Armazenamento**, escolha uma pasta pelo seletor do Android para guardar os dados principais. O Rever cria nela `Rever/dados` e sincroniza os arquivos com a cópia de trabalho interna. A pasta precisa permanecer acessível. O backup manual cria um ZIP com a biblioteca, os áudios, os arquivos temporários, as estatísticas e o cache. A restauração substitui os dados atuais depois de validar o ZIP. O backup automático fica em **Downloads/Rever/Backups**; a frequência padrão é 12 horas e pode ser alterada ou desligada. O agendamento do Android é aproximado.
 
@@ -58,3 +60,8 @@ O APK de teste fica em `app/build/outputs/apk/debug/app-debug.apk` e é assinado
 - Confirmar que a chave de lançamento foi guardada em backup. Sem ela, versões futuras não conseguem atualizar a mesma instalação.
 
 Nenhum commit ou publicação é feito pelo aplicativo ou por este procedimento de compilação.
+
+
+## Pronúncia
+
+Abra um PDF e toque em **Pronúncia** no painel dele. A tela mostra apenas as listas próprias ou herdadas desse PDF. Uma nova lista já fica associada ao PDF aberto. Cadastre uma regra por linha, como `hardware = rád uér`. Opcionalmente, marque categorias para compartilhar essa mesma lista e suas futuras alterações com os outros PDFs. Também é possível editar ou excluir a lista. As categorias são reconhecidas pelo mesmo nome nos dois aparelhos. As trocas respeitam palavras inteiras, ignoram maiúsculas/minúsculas e afetam somente o texto enviado à voz. Áudios antigos não são reutilizados quando as regras efetivas mudam; um trecho que já está tocando ou preparado pode terminar antes da mudança. Em Opções de desenvolvedor, **Pronúncia** habilita envio e recebimento quando ligada em ambos os aparelhos. Listas diferentes são mescladas; edições simultâneas na mesma lista usam a versão mais recente. PDFs e categorias continuam sendo administrados em cada biblioteca.

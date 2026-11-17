@@ -75,14 +75,17 @@ object NarrationFiles {
         return rebuildIgnored(bookFolder, paragraphs)
     }
 
-    fun automaticSpeech(paragraph: Paragraph, ignored: Set<String>): Boolean =
-        hasSpeech(paragraph.text) && paragraph.text !in ignored
+    fun automaticSpeech(paragraph: Paragraph, ignored: Set<String>,
+                        exceptions: AudioExceptions? = null): Boolean =
+        hasSpeech(paragraph.text) &&
+            (exceptions?.contains(paragraph, ignored) != true) &&
+            (exceptions != null || paragraph.text !in ignored)
 
     fun temporary(bookFolder: File, voice: String, paragraph: Paragraph): File =
-        File(bookFolder, "temp_audio/${voiceFolder(voice)}/v${ParagraphExtractor.VERSION}/p%04d-%04d.mp3".format(paragraph.page, paragraph.index))
+        File(bookFolder, "temp_audio/${voiceFolder(voice)}/v${ParagraphExtractor.VERSION}/${Pronunciations(bookFolder.parentFile!!).revision(bookFolder)}/p%04d-%04d.mp3".format(paragraph.page, paragraph.index))
 
     fun permanent(bookFolder: File, voice: String, paragraph: Paragraph): File =
-        File(bookFolder, "audio/${voiceFolder(voice)}/v${ParagraphExtractor.VERSION}/p%04d-%04d.mp3".format(paragraph.page, paragraph.index))
+        File(bookFolder, "audio/${voiceFolder(voice)}/v${ParagraphExtractor.VERSION}/${Pronunciations(bookFolder.parentFile!!).revision(bookFolder)}/p%04d-%04d.mp3".format(paragraph.page, paragraph.index))
 
     fun playable(bookFolder: File, voice: String, paragraph: Paragraph): File? =
         listOf(permanent(bookFolder, voice, paragraph), temporary(bookFolder, voice, paragraph))
